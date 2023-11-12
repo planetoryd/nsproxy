@@ -1,0 +1,1 @@
+RUSTFLAGS="-Zproc-macro-backtrace" cargo test

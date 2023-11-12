@@ -1,0 +1,34 @@
+workspace = { members = ["derive", "common"] }
+
+[package]
+name = "nsproxy"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+amplify = "4.5.0"
+anyhow = "1.0.75"
+clap = "4.4.7"
+clone3 = "0.2.3"
+daggy = { version = "0.8.0", features = ["serde", "serde-1", "stable_dag"] }
+derivative = "2.2.0"
+fully_pub = "0.1.4"
+libc = "0.2.149"
+log = "0.4.20"
+nix = { version = "0.27.1", features = ["sched"] }
+passfd = "0.1.6"
+rust-ini = "0.20.0"
+schematic = { version = "0.12.7", features = ["json"] }
+serde = { version = "1.0.190", features = ["derive"] }
+serde_json = "1.0.108"
+thiserror = "1.0.50"
+tun2proxy = { path = "./tun2proxy" }
+xdg = "2.5.2"
+nsproxy-derive = { path = "./derive" }
+nsproxy-common = { path = "./common" }
+zbus = "3.14.1"
+systemd-zbus = "0.1.1"
+libsystemd = "0.7.0"
+pidfd = "0.2.4"
