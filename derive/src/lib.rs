@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, TokenStreamExt};
 use syn::{
     parse_macro_input, parse_quote, punctuated::Punctuated, DeriveInput, Expr, ExprArray, Field,
-    Token, LitStr,
+    LitStr, Token,
 };
 
 #[proc_macro_derive(Validate, attributes(va))]
@@ -54,20 +54,20 @@ pub fn derive_validate(inp: TokenStream) -> TokenStream {
     let li = if let Some(ft) = ftype {
         if let Some(arr) = list {
             quote!(
-                type Items<'k> = [(&'k mut #ft, &'static str); #list_len] where Self: 'k;
-                fn list<'k>(&'k mut self) -> Self::Items<'k> {
-                    [#arr]
-                }
+                // type Items<'k> = [(&'k mut #ft, &'static str); #list_len] where Self: 'k;
+                // fn list<'k>(&'k mut self) ->  Option<Self::Items<'k>> {
+                //     Some([#arr])
+                // }
             )
         } else {
             unreachable!()
         }
     } else {
         quote!(
-            type Items<'k> = () where Self: 'k;
-            fn list<'k>(&'k mut self) -> Self::Items<'k> {
-                ()
-            }
+            // type Items<'k> = () where Self: 'k;
+            // fn list<'k>(&'k mut self) -> Option<Self::Items<'k>> {
+            //     None
+            // }
         )
     };
 

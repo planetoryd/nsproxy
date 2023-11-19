@@ -1,11 +1,19 @@
+use std::process::{exit, Command};
 use std::{fs::File, io::Read, os::fd::AsFd, path::PathBuf};
 
+use amplify::empty;
 use clap::{Parser, Subcommand};
 use clone3::Clone3;
-use nsproxy::data::{PNode, ProcNS};
+use daggy::petgraph::data::Build;
+use nix::sched::{unshare, CloneFlags};
+use nix::sys::prctl;
+use nix::unistd::{fork, sethostname, ForkResult};
+use nsproxy::data::{Graphs, ObjectNode, PassFD, ProcNS, Relation, TUNC};
 use nsproxy::managed::ServiceManaged;
+use nsproxy::paths::{PathState, Paths};
+use nsproxy::sys::check_capsys;
 use nsproxy::*;
-use nsproxy::{data::NodeID, systemd, tun2proxy::PNodeConf};
+use nsproxy::{data::NodeID, systemd};
 use schematic::ConfigLoader;
 use std::os::unix::net::UnixStream;
 
@@ -22,76 +30,86 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Instrument a process. If a pid is not provided, a new netns is created.
-    Inst {
+    /// One of the many methods, use TUN2Proxy and pass a device FD to it.
+    SOCKS2TUN {
         #[arg(long, short)]
         pid: Option<pid_t>,
-        /// Path to [PNodeConf]
-        conf: PathBuf,
+        /// Config file for Tun2proxy
+        #[arg(long, short)]
+        tun2proxy: Option<PathBuf>,
         /// Command to run
         cmd: Option<String>,
     },
     /// Start as watcher daemon
     Watch {},
-    /// Typically you shouldn't run this manually
+    /// Run probe process acccording to the graph
     Probe { id: NodeID },
-    /// Typically you shouldn't run this manually
-    TUN2Proxy {
-        /// Path to [PNodeConf]
-        conf: PathBuf,
-    },
+    /// Run TUN2Proxy daemon
+    TUN2Proxy { conf: PathBuf },
+    /// Requires root or equivalent.
+    /// Initiatializes user and mount namespaces
+    Init,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
+    let paths: Paths = PathState::default()?.into();
+    let mut graphs = Graphs::load_file(&paths)?;
     match cli.command {
-        Commands::Inst { pid, conf, cmd } => {
-            let con = load_conf(conf)?;
-            // make two systemd services. one for prober, one for proxy.
-            // for cmd, we setns and run it.
-            let serv = systemd::Managed::new()?;
-
-            if let Some(pid) = pid {
-                // let mounted = ProcNS::mount(pid)?;
-                // let node = PNode {
-                //     main: mounted,
-                //     out: None,
-                // };
-
+        Commands::SOCKS2TUN {
+            pid,
+            tun2proxy,
+            cmd,
+        } => {
+            let capsys = check_capsys();
+            match capsys {
+                Ok(_) => {
+                    // The user is using SUID or sudo, or we are alredy in a userns, or user did setcap.
+                    // Probably intentional
+                }
+                _ => {
+                    let uns = paths.userns().procns()?;
+                    log::warn!("CAP_SYS_ADMIN not available, entering user NS");
+                    uns.enter(CloneFlags::empty())?;
+                    check_capsys()?;
+                }
             }
+
+            let rels: Vec<Relation> = Default::default();
+            // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
+            let src = if let Some(pid) = pid {
+                let ni = graphs.data.add_node(None);
+                let proc = ProcNS::mount(&pid.to_string(), &paths, ni)?;
+                let node = &mut graphs.data[ni];
+                node.replace(ObjectNode { main: proc });
+                ni
+            } else {
+                match unsafe { fork() }? {
+                    ForkResult::Child => {
+                        unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
+                        sethostname("proxied")?;
+                        let mut cmd = Command::new(cmd.unwrap());
+                        cmd.spawn()?.wait()?;
+                        exit(0)
+                    }
+                    ForkResult::Parent { child } => {
+                        let ni = graphs.data.add_node(None);
+                        let proc = ProcNS::mount(&child.as_raw().to_string(), &paths, ni)?;
+                        let node = &mut graphs.data[ni];
+                        node.replace(ObjectNode { main: proc });
+                        ni
+                    }
+                }
+            }; // Source of TUNFD/SocketFD
+            
+            let pass = Relation::SendTUN(PassFD {
+                creation: TUNC {
+                    layer: tun::Layer::L2,
+                    name: None,
+                },
+            });
         }
-        _ => (),
+        _ => unimplemented!(),
     }
-
-    // No forking needed if we don't run tun2proxy.
-    // Read conf.
-    // If it's socket passing, create service, setns, get fd, send fd, and finish.
-
-    let mut pidfd = -1;
-    let mut clone3 = Clone3::default();
-    clone3.flag_pidfd(&mut pidfd);
-
-    let (socka, sockb) = UnixStream::pair()?;
-    match unsafe { clone3.call() }? {
-        0 => {
-            // pidfd is -1 here
-            // start tun2proxy
-        }
-        child => {
-            // pidfd is usable here
-
-            // run a shell process, send fd
-            // or setns into target process, send fd, and exit
-            // If I get FDs and fork, I get the FD for free, but the child may have problem setns-ing.
-            // Otherwise I have to use sockets.
-        }
-    }
-
     Ok(())
-}
-
-fn load_conf(conf: PathBuf) -> Result<PNodeConf> {
-    let loaded = ConfigLoader::<PNodeConf>::new().file(conf)?.load()?;
-    Ok(loaded.config)
 }

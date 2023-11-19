@@ -4,9 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::data::NodeID;
+use crate::{data::NodeID, sys::UserNS};
 
 use super::*;
+use daggy::NodeIndex;
 use xdg;
 
 /// globally shared state to derive paths
@@ -25,8 +26,9 @@ pub type Paths = Arc<PathState>;
 // We want a feature to list all possible paths used by this program
 // Otherwise it would suck, really hard.
 
+#[public]
 impl PathState {
-    pub fn default() -> Result<Self> {
+    fn default() -> Result<Self> {
         let dirs = xdg::BaseDirectories::with_prefix(DIRPREFIX)?;
         let k = Self {
             config: dirs.get_config_home(),
@@ -37,21 +39,32 @@ impl PathState {
         k.create_dirs()?;
         Ok(k)
     }
-    pub fn create_dirs(&self) -> Result<()> {
+    fn create_dirs(&self) -> Result<()> {
         create_dir_all(&self.config)?;
         create_dir_all(&self.binds)?;
         create_dir_all(&self.state)?;
 
         Ok(())
     }
-    pub fn mount(&self, id: NodeID) -> Result<Binds> {
-        Ok(Binds(checked_path(self.binds.join(id.to_string()))?))
+    fn mount(&self, id: NodeIndex<NodeID>) -> Result<Binds> {
+        Ok(Binds(checked_path(
+            self.binds.join(id.index().to_string()),
+        )?))
+    }
+    fn private(&self) -> PathBuf {
+        self.binds.join("private")
+    }
+    fn user(&self) -> PathBuf {
+        self.binds.join("user")
+    }
+    fn userns(&self) -> UserNS {
+        UserNS(&self)
     }
 }
 
 pub struct Binds(PathBuf);
 
-// pass it through 
+// pass it through
 pub fn checked_path(p: PathBuf) -> Result<PathBuf> {
     create_dir_all(&p)?;
     Ok(p)

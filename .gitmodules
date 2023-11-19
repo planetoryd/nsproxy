@@ -1,3 +1,24 @@
 [submodule "tun2proxy"]
 	path = tun2proxy
 	url = https://github.com/blechschmidt/tun2proxy/
+[submodule "rust-tun"]
+	path = rust-tun
+	url = https://github.com/meh/rust-tun
+[submodule "netlink-ops"]
+	path = netlink-ops
+	url = https://github.com/planetoryd/netlink-ops
+[submodule "rtnetlink"]
+	path = rtnetlink
+	url = https://github.com/planetoryd/rtnetlink
+[submodule "rustables"]
+	path = rustables
+	url = https://github.com/planetoryd/rustables
+[submodule "netlink-packet-audit"]
+	path = netlink-packet-audit
+	url = https://github.com/planetoryd/netlink-packet-audit
+[submodule "netlink-sys"]
+	path = netlink-sys
+	url = https://github.com/planetoryd/netlink-sys
+[submodule "netlink-proto"]
+	path = netlink-proto
+	url = https://github.com/planetoryd/netlink-proto

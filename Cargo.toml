@@ -1,9 +1,25 @@
-workspace = { members = ["derive", "common"] }
+workspace = { members = [
+    "derive",
+    "common",
+    "rust-tun",
+    "netlink-ops",
+    "netlink-packet-audit",
+    "netlink-proto",
+    "netlink-sys",
+    "rtnetlink",
+    "rustables",
+] }
 
 [package]
 name = "nsproxy"
 version = "0.1.0"
 edition = "2021"
+
+
+[profile.release]
+strip = true
+opt-level = "z" # bottleneck is size, not cpu
+lto = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,7 +33,7 @@ derivative = "2.2.0"
 fully_pub = "0.1.4"
 libc = "0.2.149"
 log = "0.4.20"
-nix = { version = "0.27.1", features = ["sched"] }
+nix = { version = "0.27.1", features = ["sched", "net", "mount", "env", "hostname"] }
 passfd = "0.1.6"
 rust-ini = "0.20.0"
 schematic = { version = "0.12.7", features = ["json"] }
@@ -32,3 +48,6 @@ zbus = "3.14.1"
 systemd-zbus = "0.1.1"
 libsystemd = "0.7.0"
 pidfd = "0.2.4"
+tun = { path = "./rust-tun" }
+netlink-ops = { path = "./netlink-ops" }
+capctl = "0.2.3"

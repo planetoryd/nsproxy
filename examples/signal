@@ -1,0 +1,70 @@
+// let k = mg.receive_unit_new()?;
+// for k in k {
+//     dbg!(k);
+// }
+
+hash@hash-pc /s/n/nsproxy (master)> sudo ./target/debug/examples/systemd
+[examples/systemd.rs:14] k = UnitNew(
+    Msg {
+        type: Signal,
+        sender: UniqueName(
+            Str(
+                Borrowed(
+                    ":1.4",
+                ),
+            ),
+        ),
+        path: ObjectPath(
+            "/org/freedesktop/systemd1",
+        ),
+        iface: InterfaceName(
+            Str(
+                Borrowed(
+                    "org.freedesktop.systemd1.Manager",
+                ),
+            ),
+        ),
+        member: MemberName(
+            Str(
+                Borrowed(
+                    "UnitNew",
+                ),
+            ),
+        ),
+        body: Signature(
+            "so",
+        ),
+    },
+)
+[examples/systemd.rs:14] k = UnitNew(
+    Msg {
+        type: Signal,
+        sender: UniqueName(
+            Str(
+                Borrowed(
+                    ":1.4",
+                ),
+            ),
+        ),
+        path: ObjectPath(
+            "/org/freedesktop/systemd1",
+        ),
+        iface: InterfaceName(
+            Str(
+                Borrowed(
+                    "org.freedesktop.systemd1.Manager",
+                ),
+            ),
+        ),
+        member: MemberName(
+            Str(
+                Borrowed(
+                    "UnitNew",
+                ),
+            ),
+        ),
+        body: Signature(
+            "so",
+        ),
+    },
+)
