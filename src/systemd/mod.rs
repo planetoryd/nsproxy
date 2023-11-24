@@ -3,18 +3,19 @@
 
 use std::{
     env::current_exe,
-    fs::create_dir_all,
+    fs::{create_dir_all, remove_file},
     path::{Path, PathBuf},
 };
 
 use anyhow::Result;
 use daggy::NodeIndex;
+use systemd_zbus::ManagerProxy;
 use tun::Layer;
 
 use super::*;
 use crate::{
-    data::{NodeID, PassFD, Relation},
-    managed::{ServiceManaged, Socks2TUN},
+    data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation},
+    managed::{Indexed, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, SrcNode},
 };
 
 pub mod service;
@@ -22,64 +23,158 @@ pub mod service;
 /// State data about the interfacing of service manager (process, task scheduler) and the proxy graph.
 pub struct Systemd {
     tun2proxy_socks: PathBuf,
+    systemd_unit: PathBuf,
     self_path: PathBuf,
+    conn: zbus::Connection,
 }
 
-#[public]
-impl Socks2TUN {
-    fn stem(&self) ->  String{
-        
+
+impl<'b> MItem for Socks2TUN<'b> {
+    type Param = Layer;
+    type Serv = Systemd;
+}
+
+impl<'k> MItem for NodeWDeps<'k> {
+    type Param = ();
+    type Serv = Systemd;
+}
+
+/// Represents the probe
+impl<'k> MItem for SrcNode<'k> {
+    type Param = ();
+    type Serv = Systemd;
+}
+
+// Therefore, the items are different perspectives upon the graph, by which we peform actions.
+
+impl<'k> ItemRM for SrcNode<'k> {
+    async fn remove(&self, serv: &Self::Serv) -> Result<()> {
+        remove_file(serv.systemd_unit.join(self.service()?))?;
+        Ok(())
     }
 }
 
-impl ServiceManaged for Systemd {
-    fn new() -> Result<Self> {
-        let path = "/run/nsproxy/tun2proxy/".parse()?;
-        create_dir_all(&path)?;
-        Ok(Self {
-            tun2proxy_socks: path,
-            self_path: current_exe()?,
-        })
+pub trait UnitName {
+    fn stem(&self) -> Result<String>;
+    fn service(&self) -> Result<String> {
+        Ok(self.stem()? + ".service")
     }
-    /// Creates a socket, and a tun2proxy service with the same name as the config file
-    fn socks2tun(&self, layer: Layer, Socks2TUN { confpath, src }: Socks2TUN) -> Result<Relation> {
-        let stem = confpath.file_stem().unwrap();
-        let mut name = stem.to_owned();
-        name.push(".sock");
-        let name_str = name.to_string_lossy();
-        let mut spath: PathBuf = self.tun2proxy_socks.clone();
-        spath.push(name);
+    fn socket(&self) -> Result<String> {
+        Ok(self.stem()? + ".socket")
+    }
+    fn sockpath(&self, dir: &Path) -> Result<PathBuf> {
+        Ok(dir.join(self.socket()?))
+    }
+}
 
+impl<'k> UnitName for SrcNode<'k> {
+    fn stem(&self) -> Result<String> {
+        Ok(format!("probe{}", self.id.index()))
+    }
+}
+
+impl<'k> ItemCreate for NodeWDeps<'k> {
+    type Created = ();
+    async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created> {
+        let place = &self.0;
+        let relations = &self.1;
+        let servname = place.service()?;
+        let mut deps = Vec::new();
+        for Indexed { id, item: rel } in relations.iter() {
+            let rec = match rel.as_ref().unwrap() {
+                Relation::SendTUN(pf) => &pf.receiver,
+                Relation::SendSocket(pf) => &pf.receiver,
+            };
+            let unit: String = match rec {
+                FDRecver::Systemd(unit_name) => unit_name.clone(),
+                FDRecver::TUN2Proxy(confpath) => Socks2TUN { confpath, ix: *id }.service()?,
+                FDRecver::DontCare => continue,
+            };
+            deps.push(unit);
+        }
+        let deplist = deps.join(" ");
+        let mut service = ini::Ini::new();
+        service
+            .with_section(Some("Unit"))
+            .set("Description", format!("Probe in {:?}", place.id))
+            .set("Requires", &deplist)
+            .set("After", &deplist);
+        service.with_section(Some("Service")).set(
+            "ExecStart",
+            format!("{:?} probe {:?}", &serv.self_path, &place.id.index()),
+        );
+        let servpath = serv.systemd_unit.join(&servname);
+        service.write_to_file(&servpath)?;
+        Ok(())
+    }
+}
+
+impl<'b> ItemCreate for Socks2TUN<'b> {
+    type Created = Relation;
+    async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created> {
+        let spath = self.sockpath(&serv.tun2proxy_socks)?;
+        let stem = self.stem()?;
+        let selfsock = self.socket()?;
         // Add the tun2proxy unit
         let mut socket = ini::Ini::new();
         socket
             .with_section(Some("Unit"))
-            .set("Description", format!("FD Receiver of {:?}", stem));
+            .set("Description", format!("FD Receiver of {:?}", &stem));
         socket
             .with_section(Some("Socket"))
-            .set("ListenStream", spath.to_string_lossy());
-        socket.write_to_file(spath)?;
+            .set("ListenStream", path_to_str(&spath)?);
+        socket.write_to_file(&spath)?;
 
         let mut service = ini::Ini::new();
         service
             .with_section(Some("Unit"))
-            .set("Description", format!("TUN2Proxy of {stem:?}"))
-            .set("Requires", name_str)
-            .set("After", name_str);
+            .set("Description", format!("TUN2Proxy of {:?}", &stem))
+            .set("Requires", &selfsock)
+            .set("After", &selfsock);
         service.with_section(Some("Service")).set(
             "ExecStart",
-            format!("{:?} tun2proxy {:?}", &self.self_path, &confpath),
+            format!("{:?} tun2proxy {:?}", &serv.self_path, &self.confpath),
         );
-        let servname = stem.to_string_lossy().into_owned() + ".service";
-        let servpath = ["/etc/systemd/system/", &servname]
-            .iter()
-            .collect::<PathBuf>();
+        let servname = self.service()?;
+        let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
-
         Ok(Relation::SendTUN(PassFD {
-            creation: data::TUNC { layer, name: None },
-            receiver: data::FDRecver::TUN2Proxy(confpath),
+            creation: data::TUNC {
+                layer: param,
+                name: None,
+            },
+            receiver: data::FDRecver::TUN2Proxy(self.confpath.to_owned()),
             listener: spath,
         }))
+    }
+}
+
+impl<'b> ItemRM for Socks2TUN<'b> {
+    async fn remove(&self, serv: &Self::Serv) -> Result<()> {
+        remove_file(serv.systemd_unit.join(self.service()?))?;
+        remove_file(serv.systemd_unit.join(self.socket()?))?;
+        Ok(())
+    }
+}
+
+impl ServiceM for Systemd {
+    type Ctx<'c> = ManagerProxy<'c>;
+    async fn new() -> Result<Self> {
+        let path = "/run/nsproxy/tun2proxy/".parse()?;
+        create_dir_all(&path)?;
+        let conn = zbus::Connection::system().await?;
+        Ok(Self {
+            systemd_unit: "/etc/systemd/system/".parse()?,
+            tun2proxy_socks: path,
+            self_path: current_exe()?,
+            conn,
+        })
+    }
+    async fn ctx<'k>(&'k self) -> Result<Self::Ctx<'k>> {
+        Ok(ManagerProxy::new(&self.conn).await?)
+    }
+    async fn reload(&self, ctx: Self::Ctx<'_>) -> Result<()> {
+        ctx.reload().await?;
+        Ok(())
     }
 }

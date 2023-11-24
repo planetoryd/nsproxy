@@ -7,7 +7,7 @@ use std::io::Read;
 
 use super::*;
 use crate::{
-    data::{ExactNS, Graphs, NodeID, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode},
+    data::{ExactNS, Graphs, Ix, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode, NodeI},
     paths::{PathState, Paths},
 };
 

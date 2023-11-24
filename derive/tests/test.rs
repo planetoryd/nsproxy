@@ -10,11 +10,7 @@ struct S1 {
 
 struct K;
 impl Validate for K {
-    type Items<'k> = ()  where Self: 'k;
     fn validate(&self) -> Result<()> {
         Ok(())
-    }
-    fn list<'k>(&'k mut self) -> Self::Items<'k> {
-        ()
     }
 }

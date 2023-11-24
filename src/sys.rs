@@ -79,7 +79,7 @@ pub macro ns_call( $group:ident, $func:ident,[$($name:ident),*] ) {
 #[public]
 impl ProcNS {
     /// Pin down namespaces of a process.
-    fn mount(pid: &str, paths: &PathState, id: NodeIndex<NodeID>) -> Result<Self> {
+    fn mount(pid: &str, paths: &PathState, id: NodeI) -> Result<Self> {
         let mut nsg: NSGroup<ExactNS<PathBuf>> = NSGroup::default();
         let binds = paths.mount(id)?;
         mount_by_pid!(pid, &binds, nsg, [net, uts, pid]);
@@ -128,11 +128,13 @@ impl From<stat> for UniqueFile {
 }
 
 impl ExactNS<pid_t> {
-    pub fn from(pid: pid_t, name: &str) -> Result<Self> {
-        let path = PathBuf::from(format!("/proc/{}/ns/{}", pid, name));
-        let stat = nix::sys::stat::stat(&path)?;
-        Ok(Self {
-            unique: stat.into(),
+    /// Uses Pid FD
+    pub fn from(pid: pid_t) -> Result<Self> {
+        let f = unsafe { pidfd::PidFd::open(pid, 0) }?;
+        let fd = f.as_raw_fd();
+        let st = fstat(fd)?;
+        Ok(ExactNS {
+            unique: st.into(),
             source: pid,
         })
     }
@@ -141,6 +143,14 @@ impl ExactNS<pid_t> {
 #[public]
 impl ExactNS<PathBuf> {
     fn from(path: PathBuf) -> Result<Self> {
+        let stat = nix::sys::stat::stat(&path)?;
+        Ok(Self {
+            unique: stat.into(),
+            source: path,
+        })
+    }
+    pub fn from_pid(pid: pid_t, name: &str) -> Result<Self> {
+        let path = PathBuf::from(format!("/proc/{}/ns/{}", pid, name));
         let stat = nix::sys::stat::stat(&path)?;
         Ok(Self {
             unique: stat.into(),

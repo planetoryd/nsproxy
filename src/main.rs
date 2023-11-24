@@ -1,3 +1,6 @@
+#![feature(decl_macro)]
+
+use std::future::Future;
 use std::process::{exit, Command};
 use std::{fs::File, io::Read, os::fd::AsFd, path::PathBuf};
 
@@ -9,11 +12,11 @@ use nix::sched::{unshare, CloneFlags};
 use nix::sys::prctl;
 use nix::unistd::{fork, sethostname, ForkResult};
 use nsproxy::data::{Graphs, ObjectNode, PassFD, ProcNS, Relation, TUNC};
-use nsproxy::managed::ServiceManaged;
+use nsproxy::managed::{Indexed, NodeWDeps, ServiceM, Socks2TUN};
 use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::check_capsys;
 use nsproxy::*;
-use nsproxy::{data::NodeID, systemd};
+use nsproxy::{data::Ix, systemd};
 use schematic::ConfigLoader;
 use std::os::unix::net::UnixStream;
 
@@ -31,19 +34,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// One of the many methods, use TUN2Proxy and pass a device FD to it.
+    /// TUN2proxy will connect to a SOCKS5 proxy in current NS, and serve a TUN in the app NS.
     SOCKS2TUN {
         #[arg(long, short)]
         pid: Option<pid_t>,
         /// Config file for Tun2proxy
         #[arg(long, short)]
-        tun2proxy: Option<PathBuf>,
+        tun2proxy: PathBuf,
         /// Command to run
         cmd: Option<String>,
     },
     /// Start as watcher daemon
     Watch {},
-    /// Run probe process acccording to the graph
-    Probe { id: NodeID },
+    /// Run probe process acccording to the graph. ID for Node ID
+    Probe { id: Ix },
     /// Run TUN2Proxy daemon
     TUN2Proxy { conf: PathBuf },
     /// Requires root or equivalent.
@@ -75,7 +79,6 @@ fn main() -> Result<()> {
                 }
             }
 
-            let rels: Vec<Relation> = Default::default();
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
             let src = if let Some(pid) = pid {
                 let ni = graphs.data.add_node(None);
@@ -101,15 +104,36 @@ fn main() -> Result<()> {
                     }
                 }
             }; // Source of TUNFD/SocketFD
-            
-            let pass = Relation::SendTUN(PassFD {
-                creation: TUNC {
-                    layer: tun::Layer::L2,
-                    name: None,
-                },
-            });
+            let srcnode = Indexed {
+                id: src,
+                item: &graphs.data[src].unwrap(),
+            };
+            // graphs.data.add_edge(src, , weight)
+            // let socks2 = Socks2TUN {
+            //     confpath: &tun2proxy,
+            // };
+            // Mount current NS and add a link
+            // let socks2t = Socks2TUN::new(&tun2proxy, ix)?;
+            asyncexe(async {
+                let serv = systemd::Systemd::new().await?;
+                let ctx = serv.ctx().await?;
+                let nodew = NodeWDeps(srcnode);
+                aok!()
+            })?;
         }
         _ => unimplemented!(),
     }
     Ok(())
+}
+
+fn asyncexe<F>(fut: F) -> Result<tokio::task::JoinHandle<F::Output>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let k = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .spawn(fut);
+    Ok(k)
 }

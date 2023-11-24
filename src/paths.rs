@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{data::NodeID, sys::UserNS};
+use crate::{data::{Ix, NodeI}, sys::UserNS};
 
 use super::*;
 use daggy::NodeIndex;
@@ -46,7 +46,7 @@ impl PathState {
 
         Ok(())
     }
-    fn mount(&self, id: NodeIndex<NodeID>) -> Result<Binds> {
+    fn mount(&self, id: NodeI) -> Result<Binds> {
         Ok(Binds(checked_path(
             self.binds.join(id.index().to_string()),
         )?))

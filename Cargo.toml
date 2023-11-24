@@ -33,7 +33,13 @@ derivative = "2.2.0"
 fully_pub = "0.1.4"
 libc = "0.2.149"
 log = "0.4.20"
-nix = { version = "0.27.1", features = ["sched", "net", "mount", "env", "hostname"] }
+nix = { version = "0.27.1", features = [
+    "sched",
+    "net",
+    "mount",
+    "env",
+    "hostname",
+] }
 passfd = "0.1.6"
 rust-ini = "0.20.0"
 schematic = { version = "0.12.7", features = ["json"] }
@@ -51,3 +57,5 @@ pidfd = "0.2.4"
 tun = { path = "./rust-tun" }
 netlink-ops = { path = "./netlink-ops" }
 capctl = "0.2.3"
+tokio = "1.34.0"
+petgraph = { version = "0.6.4" }
