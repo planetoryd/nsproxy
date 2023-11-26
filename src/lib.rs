@@ -1,6 +1,8 @@
 #![feature(custom_inner_attributes)]
 #![feature(proc_macro_hygiene)]
 #![feature(decl_macro)]
+#![feature(async_fn_in_trait)]
+#![feature(impl_trait_projections)]
 #![allow(async_fn_in_trait)]
 
 pub mod flatpak;

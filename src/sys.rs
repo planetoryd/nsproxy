@@ -96,6 +96,15 @@ impl ProcNS {
         }
         Ok(())
     }
+    fn key(&self) -> UniqueFile {
+        match self {
+            ProcNS::ByPath(p) => match &p.net {
+                NSSlot::Provided(a, _) => a.unique,
+                _ => unreachable!()
+            },
+            ProcNS::PidFd(p) => p.unique
+        }
+    }
 }
 
 // cargo test mount_self -- --nocapture

@@ -1,4 +1,9 @@
-use std::{collections::HashMap, default, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    default,
+    net::SocketAddr,
+    path::PathBuf,
+};
 
 use crate::sys::NSEnter;
 
@@ -221,24 +226,29 @@ pub type RouteDAG = Dag<RouteNode, Route, Ix>;
 // Allows parallel edges
 /// Data are used with [Option] because they are allocated and later filled.
 pub type ObjectGraph = StableDiGraph<Option<ObjectNode>, Option<Relation>, Ix>;
-/// Maps NETNS inode to object nodes
+/// Maps NETNS to object nodes
 /// Contract: If and only if a key pair exists, the object exists in the graph
-pub type ObjectIno = HashMap<u64, Vec<Ix>>;
+/// For simplicity, for one netns, only one object may exist, and other NSes are attached to it.
+pub type ObjectNS = HashMap<UniqueFile, NodeI>;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[public]
 struct Graphs {
     route: RouteDAG,
     data: ObjectGraph,
-    ino: ObjectIno,
+    /// Maps objects to NetNS files
+    map: ObjectNS,
 }
 
 #[public]
 impl Graphs {
-    // fn add_object(&mut self) -> &mut ObjectNode {
-    //     let ix = self.data.add_node(None);
-
-    // }
+    fn add_object(&mut self, f: impl FnOnce(NodeI) -> ObjectNode) {
+        let ix: NodeI = self.data.add_node(None);
+        let node = f(ix);
+        let uf = node.main.key();
+        self.map.entry(uf);
+        todo!()
+    }
 }
 
 // I have experimented. The inode number of root netns does not change across reboots.
