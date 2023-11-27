@@ -7,7 +7,9 @@ use std::io::Read;
 
 use super::*;
 use crate::{
-    data::{ExactNS, Graphs, Ix, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode, NodeI},
+    data::{
+        ExactNS, Graphs, Ix, NodeI, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode,
+    },
     paths::{PathState, Paths},
 };
 
@@ -43,6 +45,11 @@ impl Graphs {
         let mut st = Default::default();
         file.read_to_string(&mut st)?;
         Self::load(&st)
+    }
+    pub fn dump_file(&self, path: &PathState) -> Result<()> {
+        let mut file = std::fs::File::open(path.state.join("graphs.json"))?;
+        serde_json::to_writer_pretty(file, self)?;
+        Ok(())
     }
 }
 

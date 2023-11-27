@@ -33,8 +33,8 @@ pub trait ServiceM: Sized {
 }
 
 pub type SrcNode<'k> = Indexed<NodeI, &'k ObjectNode>;
-pub type SrcDeps<'k> = Vec<Indexed<EdgeI, &'k Option<Relation>>>;
-pub type NodeWDeps<'k> = (SrcNode<'k>, SrcDeps<'k>);
+pub type SrcDeps<'k> = Vec<Indexed<EdgeI, &'k Relation>>;
+pub type NodeWDeps<'n, 'd> = (SrcNode<'n>, SrcDeps<'d>);
 pub type IRelation<'k> = Indexed<EdgeI, &'k Relation>;
 
 /// Modeled after systemd
@@ -45,14 +45,23 @@ pub trait MItem {
 
 /// Meaning as in systemd
 pub trait ItemPersist: MItem {
-    async fn enable(&self, serv: &Self::Serv) -> Result<()>;
-    async fn disable(&self, serv: &Self::Serv) -> Result<()>;
+    async fn enable(
+        &self,
+        serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()>;
+    async fn disable(
+        &self,
+        serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()>;
 }
 
 /// Meaning as in systemd
 pub trait ItemAction: MItem {
-    async fn stop(&self, serv: &Self::Serv) -> Result<()>;
-    async fn start(&self, serv: &Self::Serv) -> Result<()>;
+    async fn stop(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>) -> Result<()>;
+    async fn start(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>)
+        -> Result<()>;
 }
 
 pub trait ItemCreate: MItem {
@@ -102,37 +111,39 @@ impl<'b> UnitName for Socks2TUN<'b> {
 
 #[public]
 impl Graphs {
-    /// Execute a graph (plan)
-    async fn handle<'g: 'nw, 'nw, S: ServiceM>(&'g self, serv: &'nw S) -> Result<()>
+    async fn write_all<'g: 'n + 'd, 'n, 'd, S: ServiceM>(&'g self, serv: &'g S) -> Result<()>
     where
-        NodeWDeps<'nw>: ItemCreate<Param = (), Serv = S>,
+        NodeWDeps<'n, 'd>: ItemCreate<Param = (), Serv = S>,
     {
         let data = &self.data;
-        for (id, on) in data.node_references() {
-            let ed = data
-                // A --push FD--> B
-                .edges_directed(id, Direction::Outgoing)
-                .collect::<Vec<_>>();
-            if ed.len() > 0 {
-                let ew = ed
-                    .iter()
-                    .map(|e| Indexed {
-                        id: e.id(),
-                        item: e.weight(),
-                    })
-                    .collect::<Vec<_>>();
-                let srcnode = Indexed {
-                    id,
-                    item: on.as_ref().unwrap(),
-                };
-                // Each node is the an NS where probe enters
-                let wdeps: NodeWDeps = (srcnode, ew);
-                // Write the probe unit with Requires
-                wdeps.write((), serv).await?;
-                // Override all the configs each time we execute a graph
-                // This only concerns the probe services. The dependencies, daemons, and other user specified units are added as dependency.
-            }
+        for (id, _on) in data.node_references() {
+            // Each node is the an NS where probe enters
+            let wdeps: NodeWDeps = self.nodewdeps(id);
+            // Write the probe unit with Requires
+            wdeps.write((), serv).await?;
+            // Override all the configs each time we execute a graph
+            // This only concerns the probe services. The dependencies, daemons, and other user specified units are added as dependency.
         }
         Ok(())
+    }
+    fn nodewdeps(&self, id: NodeI) -> NodeWDeps {
+        let ed = self
+            .data
+            // A --push FD--> B
+            .edges_directed(id, Direction::Outgoing)
+            .collect::<Vec<_>>();
+        let ew = ed
+            .iter()
+            .map(|e| Indexed {
+                id: e.id(),
+                item: e.weight().as_ref().unwrap(),
+            })
+            .collect::<Vec<_>>();
+        let srcnode = Indexed {
+            id,
+            item: self.data[id].as_ref().unwrap(),
+        };
+        // Each node is the an NS where probe enters
+        (srcnode, ew)
     }
 }

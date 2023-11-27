@@ -3,23 +3,24 @@
 #![feature(decl_macro)]
 #![feature(async_fn_in_trait)]
 #![feature(impl_trait_projections)]
+#![feature(associated_type_defaults)]
 #![allow(async_fn_in_trait)]
 
-pub mod flatpak;
-pub mod tun2proxy;
 pub mod data;
+pub mod flatpak;
 pub mod graph;
-pub mod systemd;
 pub mod managed;
-pub mod sys;
 pub mod paths;
 pub mod probe;
+pub mod sys;
+pub mod systemd;
+pub mod tun2proxy;
 
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 pub use anyhow::Result;
-pub use libc::pid_t;
-pub use fully_pub::fully_pub as public; // make everything pub
+pub use fully_pub::fully_pub as public;
+pub use libc::pid_t; // make everything pub
 
 use thiserror::Error;
 
@@ -33,4 +34,20 @@ pub fn path_to_str(pa: &Path) -> Result<&str> {
 
 pub macro aok() {
     Ok::<(), anyhow::Error>(())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PidPath {
+    Selfproc,
+    N(i32),
+}
+
+#[public]
+impl PidPath {
+    fn to_str(&self) -> Cow<'static, str> {
+        match self {
+            PidPath::N(n) => n.to_string().into(),
+            PidPath::Selfproc => "self".into(),
+        }
+    }
 }

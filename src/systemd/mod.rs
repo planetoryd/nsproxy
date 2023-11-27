@@ -9,13 +9,15 @@ use std::{
 
 use anyhow::Result;
 use daggy::NodeIndex;
-use systemd_zbus::ManagerProxy;
+use systemd_zbus::{ManagerProxy, Mode::Replace};
 use tun::Layer;
 
 use super::*;
 use crate::{
     data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation},
-    managed::{Indexed, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, SrcNode},
+    managed::{
+        Indexed, ItemAction, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, SrcNode,
+    },
 };
 
 pub mod service;
@@ -28,13 +30,12 @@ pub struct Systemd {
     conn: zbus::Connection,
 }
 
-
 impl<'b> MItem for Socks2TUN<'b> {
     type Param = Layer;
     type Serv = Systemd;
 }
 
-impl<'k> MItem for NodeWDeps<'k> {
+impl<'n, 'd> MItem for NodeWDeps<'n, 'd> {
     type Param = ();
     type Serv = Systemd;
 }
@@ -50,6 +51,25 @@ impl<'k> MItem for SrcNode<'k> {
 impl<'k> ItemRM for SrcNode<'k> {
     async fn remove(&self, serv: &Self::Serv) -> Result<()> {
         remove_file(serv.systemd_unit.join(self.service()?))?;
+        Ok(())
+    }
+}
+
+impl<'k> ItemAction for SrcNode<'k> {
+    async fn start(
+        &self,
+        _serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()> {
+        ctx.start_unit(&self.service()?, Replace).await?;
+        Ok(())
+    }
+    async fn stop(
+        &self,
+        _serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()> {
+        ctx.stop_unit(&self.service()?, Replace).await?;
         Ok(())
     }
 }
@@ -73,7 +93,7 @@ impl<'k> UnitName for SrcNode<'k> {
     }
 }
 
-impl<'k> ItemCreate for NodeWDeps<'k> {
+impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
     type Created = ();
     async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created> {
         let place = &self.0;
@@ -81,7 +101,7 @@ impl<'k> ItemCreate for NodeWDeps<'k> {
         let servname = place.service()?;
         let mut deps = Vec::new();
         for Indexed { id, item: rel } in relations.iter() {
-            let rec = match rel.as_ref().unwrap() {
+            let rec = match rel {
                 Relation::SendTUN(pf) => &pf.receiver,
                 Relation::SendSocket(pf) => &pf.receiver,
             };

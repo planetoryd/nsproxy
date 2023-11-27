@@ -33,15 +33,17 @@ use std::{mem::size_of, os::fd::RawFd};
 use anyhow::Result;
 use nix::{
     errno::Errno,
-    libc::{c_int, c_long, SYS_mount_setattr, AT_FDCWD, MS_PRIVATE},
+    libc::{c_int, SYS_mount_setattr, AT_FDCWD, MS_PRIVATE},
     NixPath,
 };
 
 #[public]
 impl<K: NSTrait> NSSlot<ExactNS<PathBuf>, K> {
-    fn mount(pid: &str, binds: &Binds) -> Result<Self> {
+    fn mount(pid: PidPath, binds: &Binds) -> Result<Self> {
         let name = K::NAME;
-        let path: PathBuf = ["/proc", pid, "ns", name].iter().collect();
+        let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", name]
+            .iter()
+            .collect();
         let stat = nix::sys::stat::stat(&path)?;
         let bindat = binds.ns(name);
         let _ = File::create(&bindat)?;
@@ -79,12 +81,16 @@ pub macro ns_call( $group:ident, $func:ident,[$($name:ident),*] ) {
 #[public]
 impl ProcNS {
     /// Pin down namespaces of a process.
-    fn mount(pid: &str, paths: &PathState, id: NodeI) -> Result<Self> {
+    fn mount(pid: PidPath, paths: &PathState, id: NodeI) -> Result<Self> {
         let mut nsg: NSGroup<ExactNS<PathBuf>> = NSGroup::default();
         let binds = paths.mount(id)?;
         mount_by_pid!(pid, &binds, nsg, [net, uts, pid]);
 
         Ok(Self::ByPath(nsg))
+    }
+    /// Identify the key as in the map
+    fn key_ident(pid: PidPath) -> Result<ExactNS<PathBuf>> {
+        ExactNS::<PathBuf>::from_pid(pid, "net")
     }
     fn enter(&self, f: CloneFlags) -> Result<()> {
         match &self {
@@ -100,9 +106,9 @@ impl ProcNS {
         match self {
             ProcNS::ByPath(p) => match &p.net {
                 NSSlot::Provided(a, _) => a.unique,
-                _ => unreachable!()
+                _ => unreachable!(),
             },
-            ProcNS::PidFd(p) => p.unique
+            ProcNS::PidFd(p) => p.unique,
         }
     }
 }
@@ -115,7 +121,7 @@ fn mount_self() -> Result<()> {
     let path = PathState::default()?;
     let path: Paths = path.into();
     dbg!(path.clone());
-    let mounted = ProcNS::mount("self", &path, 3.into())?;
+    let mounted = ProcNS::mount(PidPath::Selfproc, &path, 3.into())?;
     dbg!(mounted);
 
     Ok(())
@@ -158,8 +164,8 @@ impl ExactNS<PathBuf> {
             source: path,
         })
     }
-    pub fn from_pid(pid: pid_t, name: &str) -> Result<Self> {
-        let path = PathBuf::from(format!("/proc/{}/ns/{}", pid, name));
+    pub fn from_pid(pid: PidPath, name: &str) -> Result<Self> {
+        let path = PathBuf::from(format!("/proc/{}/ns/{}", pid.to_str(), name));
         let stat = nix::sys::stat::stat(&path)?;
         Ok(Self {
             unique: stat.into(),

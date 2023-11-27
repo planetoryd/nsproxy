@@ -12,13 +12,14 @@ use nix::sched::{unshare, CloneFlags};
 use nix::sys::prctl;
 use nix::unistd::{fork, sethostname, ForkResult};
 use nsproxy::data::{Graphs, ObjectNode, PassFD, ProcNS, Relation, TUNC};
-use nsproxy::managed::{Indexed, NodeWDeps, ServiceM, Socks2TUN};
+use nsproxy::managed::{Indexed, ItemAction, ItemCreate, NodeWDeps, ServiceM, Socks2TUN, SrcNode};
 use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::check_capsys;
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
 use schematic::ConfigLoader;
 use std::os::unix::net::UnixStream;
+use tun::Layer;
 
 #[derive(Parser)]
 #[command(
@@ -81,11 +82,7 @@ fn main() -> Result<()> {
 
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
             let src = if let Some(pid) = pid {
-                let ni = graphs.data.add_node(None);
-                let proc = ProcNS::mount(&pid.to_string(), &paths, ni)?;
-                let node = &mut graphs.data[ni];
-                node.replace(ObjectNode { main: proc });
-                ni
+                graphs.add_object(PidPath::N(pid), &paths)?
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
@@ -96,28 +93,22 @@ fn main() -> Result<()> {
                         exit(0)
                     }
                     ForkResult::Parent { child } => {
-                        let ni = graphs.data.add_node(None);
-                        let proc = ProcNS::mount(&child.as_raw().to_string(), &paths, ni)?;
-                        let node = &mut graphs.data[ni];
-                        node.replace(ObjectNode { main: proc });
-                        ni
+                        graphs.add_object(PidPath::N(child.as_raw()), &paths)?
                     }
                 }
             }; // Source of TUNFD/SocketFD
-            let srcnode = Indexed {
-                id: src,
-                item: &graphs.data[src].unwrap(),
-            };
-            // graphs.data.add_edge(src, , weight)
-            // let socks2 = Socks2TUN {
-            //     confpath: &tun2proxy,
-            // };
-            // Mount current NS and add a link
-            // let socks2t = Socks2TUN::new(&tun2proxy, ix)?;
-            asyncexe(async {
+            let out = graphs.add_object(PidPath::Selfproc, &paths)?;
+            let ex = graphs.data.add_edge(src, out, None);
+            asyncexe(async move {
+                let socks2t = Socks2TUN::new(&tun2proxy, ex)?;
                 let serv = systemd::Systemd::new().await?;
                 let ctx = serv.ctx().await?;
-                let nodew = NodeWDeps(srcnode);
+                let rel = socks2t.write(Layer::L2, &serv).await?;
+                graphs.data[ex].replace(rel);
+                graphs.dump_file(&paths)?;
+                graphs.write_all(&serv).await?;
+                let (probe, deps) = graphs.nodewdeps(src);
+                probe.start(&serv, &ctx).await?;
                 aok!()
             })?;
         }

@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map, HashMap, HashSet},
     default,
     net::SocketAddr,
-    path::PathBuf,
+    path::PathBuf, borrow::Cow,
 };
 
-use crate::sys::NSEnter;
+use crate::{sys::NSEnter, paths::PathState};
 
 use super::*;
 use derivative::Derivative;
@@ -242,12 +242,21 @@ struct Graphs {
 
 #[public]
 impl Graphs {
-    fn add_object(&mut self, f: impl FnOnce(NodeI) -> ObjectNode) {
-        let ix: NodeI = self.data.add_node(None);
-        let node = f(ix);
-        let uf = node.main.key();
-        self.map.entry(uf);
-        todo!()
+    /// Attempt to add a new node
+    fn add_object(&mut self, pid: PidPath, paths: &PathState) -> Result<NodeI> {
+        let ns = ProcNS::key_ident(pid)?;
+        let uf = ns.unique;
+        match self.map.entry(uf) {
+            hash_map::Entry::Occupied(en) => {
+                Ok(*en.get())
+            }
+            hash_map::Entry::Vacant(va) => {
+                let ix: NodeI = self.data.add_node(None);
+                let node = ProcNS::mount(pid, paths, ix)?;
+                self.data[ix].replace(ObjectNode { main: node });
+                Ok(*va.insert(ix))
+            }
+        }
     }
 }
 
