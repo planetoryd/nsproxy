@@ -2185,6 +2185,7 @@ dependencies = [
  "clone3",
  "daggy",
  "derivative",
+ "env_logger 0.10.1",
  "fully_pub",
  "libc",
  "libsystemd",

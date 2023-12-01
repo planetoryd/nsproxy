@@ -92,11 +92,16 @@ impl ProcNS {
     fn key_ident(pid: PidPath) -> Result<ExactNS<PathBuf>> {
         ExactNS::<PathBuf>::from_pid(pid, "net")
     }
-    fn enter(&self, f: CloneFlags) -> Result<()> {
+    // fn enter(&self, _f: CloneFlags) -> Result<()> {
+    fn enter(&self) -> Result<()> {
         match &self {
             ProcNS::ByPath(ng) => {
+                // Order matters
                 ns_call!(ng, enter_if, [user, mnt, net]);
-                // TODO
+                // TODO: Because I am not sure what are the needs here
+                // 1. Rootful mode
+                // 2. Rootless mode
+                // 3. Handling of other NSes ?
             }
             _ => todo!(),
         }
@@ -294,6 +299,7 @@ impl<'p> UserNS<'p> {
                     None::<&str>,
                 )?;
                 sa.write_all(&[0])?;
+                log::info!("UserNS inited")
             }
         }
 
@@ -332,11 +338,13 @@ impl<'p> UserNS<'p> {
             }
             remove_file(&user)?;
         }
+        log::info!("UserNS deinited");
         Ok(())
     }
     fn paths(&self) -> (PathBuf, PathBuf) {
         (self.0.user(), self.0.private().join("mnt"))
     }
+    /// Generate a [ProcNS]
     fn procns(&self) -> Result<ProcNS> {
         let (user, mnt) = self.paths();
         Ok(ProcNS::ByPath(NSGroup {

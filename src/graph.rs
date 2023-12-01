@@ -41,14 +41,19 @@ impl Graphs {
         Ok(g)
     }
     pub fn load_file(path: &PathState) -> Result<Self> {
-        let mut file = std::fs::File::open(path.state.join("graphs.json"))?;
-        let mut st = Default::default();
-        file.read_to_string(&mut st)?;
-        Self::load(&st)
+        let gp = path.state.join("graphs.json");
+        if gp.exists() {
+            let mut file = std::fs::File::open(&gp)?;
+            let mut st = Default::default();
+            file.read_to_string(&mut st)?;
+            Self::load(&st)
+        } else {
+            Ok(Graphs::default())
+        }
     }
     pub fn dump_file(&self, path: &PathState) -> Result<()> {
-        let mut file = std::fs::File::open(path.state.join("graphs.json"))?;
-        serde_json::to_writer_pretty(file, self)?;
+        let file = std::fs::File::open(path.state.join("graphs.json"))?;
+        serde_json::to_writer_pretty(&file, self)?;
         Ok(())
     }
 }

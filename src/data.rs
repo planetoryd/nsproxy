@@ -176,6 +176,7 @@ impl<N: NSEnter, K: NSTrait> NSSlot<N, K> {
         }
         Ok(())
     }
+    /// Enter the NS if provided
     fn enter_if(&self) -> Result<()> {
         match self {
             Self::Absent => (),
@@ -231,7 +232,7 @@ pub type ObjectGraph = StableDiGraph<Option<ObjectNode>, Option<Relation>, Ix>;
 /// For simplicity, for one netns, only one object may exist, and other NSes are attached to it.
 pub type ObjectNS = HashMap<UniqueFile, NodeI>;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 #[public]
 struct Graphs {
     route: RouteDAG,

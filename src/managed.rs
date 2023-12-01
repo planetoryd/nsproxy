@@ -84,6 +84,7 @@ struct Indexed<I, N> {
 // It should not persist any state, but serve as a computer, a bundle of methods.
 #[public]
 struct Socks2TUN<'b> {
+    /// File name is taken as the systemd unit name.
     confpath: &'b Path,
     /// It's possible to have multiple paths between one NS to another
     ix: EdgeIndex<Ix>,
@@ -111,7 +112,8 @@ impl<'b> UnitName for Socks2TUN<'b> {
 
 #[public]
 impl Graphs {
-    async fn write_all<'g: 'n + 'd, 'n, 'd, S: ServiceM>(&'g self, serv: &'g S) -> Result<()>
+    /// Writes to the OS
+    async fn write_probes<'g: 'n + 'd, 'n, 'd, S: ServiceM>(&'g self, serv: &'g S) -> Result<()>
     where
         NodeWDeps<'n, 'd>: ItemCreate<Param = (), Serv = S>,
     {

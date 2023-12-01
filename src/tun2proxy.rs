@@ -6,21 +6,31 @@ use serde::{Deserialize, Serialize};
 use tun2proxy::{tun_to_proxy, NetworkInterface, Options, Proxy};
 
 use anyhow::Result;
+use super::public;
 
+#[public]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Config)]
 pub struct TUN2Proxy {
     /// Url to upstream proxy
     #[setting(default = "socks5://127.0.0.1:9909")]
-    pub url: String,
-    pub dns: TUN2DNS,
+    url: String,
+    dns: TUN2DNS,
     /// Disabling will remove Ipv6 entries from DNS (when TUN2DNS::Upstream is enabled)
     #[serde(default)]
-    pub ipv6: bool,
+    ipv6: bool,
     /// Treat the FD as Tap
     #[serde(default)]
-    pub tap: bool,
+    tap: bool,
     #[setting(default = 1500)]
-    pub mtu: usize,
+    mtu: usize,
+}
+
+#[test]
+fn emptyconf() -> Result<()> {
+    let conf = TUN2Proxy::default();
+    let st = serde_json::to_string_pretty(&conf)?;
+    println!("{}", &st);
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -52,7 +62,7 @@ pub fn tuntap(args: TUN2Proxy, dev: RawFd) -> Result<()> {
     Ok(())
 }
 
-fn load_conf(conf: PathBuf) -> Result<TUN2Proxy> {
+pub fn load_conf(conf: PathBuf) -> Result<TUN2Proxy> {
     let loaded = ConfigLoader::<TUN2Proxy>::new().file(conf)?.load()?;
     Ok(loaded.config)
 }

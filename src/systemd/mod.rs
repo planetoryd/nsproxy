@@ -79,11 +79,11 @@ pub trait UnitName {
     fn service(&self) -> Result<String> {
         Ok(self.stem()? + ".service")
     }
-    fn socket(&self) -> Result<String> {
+    fn sockunit(&self) -> Result<String> {
         Ok(self.stem()? + ".socket")
     }
-    fn sockpath(&self, dir: &Path) -> Result<PathBuf> {
-        Ok(dir.join(self.socket()?))
+    fn sockf(&self) -> Result<String> {
+        Ok(self.stem()? + ".sock")
     }
 }
 
@@ -132,9 +132,10 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
 impl<'b> ItemCreate for Socks2TUN<'b> {
     type Created = Relation;
     async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created> {
-        let spath = self.sockpath(&serv.tun2proxy_socks)?;
+        let sunit = serv.systemd_unit.join(self.sockunit()?);
+        let sfile = serv.tun2proxy_socks.join(self.sockf()?);
         let stem = self.stem()?;
-        let selfsock = self.socket()?;
+        let selfsock = self.sockunit()?;
         // Add the tun2proxy unit
         let mut socket = ini::Ini::new();
         socket
@@ -142,8 +143,8 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
             .set("Description", format!("FD Receiver of {:?}", &stem));
         socket
             .with_section(Some("Socket"))
-            .set("ListenStream", path_to_str(&spath)?);
-        socket.write_to_file(&spath)?;
+            .set("ListenStream", path_to_str(&sfile)?);
+        socket.write_to_file(&sunit)?;
 
         let mut service = ini::Ini::new();
         service
@@ -164,7 +165,7 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
                 name: None,
             },
             receiver: data::FDRecver::TUN2Proxy(self.confpath.to_owned()),
-            listener: spath,
+            listener: sunit,
         }))
     }
 }
@@ -172,7 +173,7 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
 impl<'b> ItemRM for Socks2TUN<'b> {
     async fn remove(&self, serv: &Self::Serv) -> Result<()> {
         remove_file(serv.systemd_unit.join(self.service()?))?;
-        remove_file(serv.systemd_unit.join(self.socket()?))?;
+        remove_file(serv.systemd_unit.join(self.sockunit()?))?;
         Ok(())
     }
 }
