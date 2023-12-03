@@ -157,6 +157,8 @@ fn main() -> Result<()> {
             let usern = UserNS(&paths);
             // Fuck smart-anything.
             // Will not do anything unanticipated. Init means init
+            check_capsys()?;
+            paths.create_dirs_priv()?;
             if undo {
                 usern.deinit()?;
             } else {

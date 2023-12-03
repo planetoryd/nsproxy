@@ -4,7 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::{data::{Ix, NodeI}, sys::UserNS};
+use crate::{
+    data::{Ix, NodeI},
+    sys::UserNS,
+};
 
 use super::*;
 use daggy::NodeIndex;
@@ -16,6 +19,9 @@ use xdg;
 struct PathState {
     config: PathBuf,
     binds: PathBuf,
+    /// Privileged binds. This path shall not change across users
+    /// because the user might use sudo to create them and use it as someone else
+    priv_binds: PathBuf,
     state: PathBuf,
 }
 
@@ -35,15 +41,19 @@ impl PathState {
             // we persist NSes across reboots even tho re-creating them is cheap.
             binds: dirs.get_data_home(),
             state: dirs.get_state_home(),
+            priv_binds: "/etc/nsproxy/".into(),
         };
         k.create_dirs()?;
         Ok(k)
+    }
+    fn create_dirs_priv(&self) -> Result<()> {
+        create_dir_all(&self.priv_binds)?;
+        Ok(())
     }
     fn create_dirs(&self) -> Result<()> {
         create_dir_all(&self.config)?;
         create_dir_all(&self.binds)?;
         create_dir_all(&self.state)?;
-
         Ok(())
     }
     fn mount(&self, id: NodeI) -> Result<Binds> {
@@ -52,10 +62,10 @@ impl PathState {
         )?))
     }
     fn private(&self) -> PathBuf {
-        self.binds.join("private")
+        self.priv_binds.join("private")
     }
     fn user(&self) -> PathBuf {
-        self.binds.join("user")
+        self.priv_binds.join("user")
     }
     fn userns(&self) -> UserNS {
         UserNS(&self)

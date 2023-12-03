@@ -1,7 +1,7 @@
 //! Misc low-level code
 
 use std::{
-    fs::{create_dir, create_dir_all, remove_dir_all, remove_file, File},
+    fs::{create_dir, create_dir_all, remove_dir_all, remove_file, File, OpenOptions},
     io::{Read, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     path::PathBuf,
@@ -25,7 +25,7 @@ use nix::{
     mount::{mount, umount, MsFlags},
     sched::{setns, unshare, CloneFlags},
     sys::{signal::kill, stat::fstat},
-    unistd::{fork, ForkResult},
+    unistd::{fork, setresgid, setresuid, setuid, ForkResult, Gid, Uid, getuid, seteuid},
 };
 
 use std::{mem::size_of, os::fd::RawFd};
@@ -247,10 +247,15 @@ fn sockpairfork() -> Result<()> {
 
 #[public]
 impl<'p> UserNS<'p> {
+    fn mapid(&self, uid: u32) -> Result<()> {
+
+        Ok(())
+    }
     fn init(&self) -> Result<()> {
         let private = self.0.private();
         create_dir_all(&private)?; // doesnt error when dir exists
         mount(
+            // CAP_SYS_ADMIN
             Some(&private),
             &private,
             None::<&str>,
@@ -269,7 +274,14 @@ impl<'p> UserNS<'p> {
 
         match unsafe { fork() }? {
             ForkResult::Child => {
+                let u = Uid::from_raw(1000);
+                seteuid(u)?;
+
                 unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
+                let mut f = OpenOptions::new().write(true).open("/proc/self/uid_map")?;
+                f.write_all(b"0 1000 1")?; // map 0 (in user ns) to uid (outside)
+        
+
                 sa.write_all(&[0])?;
                 let mut k: [u8; 1] = [0];
                 sa.read_exact(&mut k)?;
@@ -416,7 +428,7 @@ unsafe fn mount_setattr(
 pub fn check_capsys() -> Result<()> {
     let caps = capctl::CapState::get_current().unwrap();
     if !caps.effective.has(capctl::Cap::SYS_ADMIN) {
-        bail!("requires SYS_ADMIN. You can run this program as root, or use a user-namespace, or set it to SUID ");
+        bail!("requires CAP_SYS_ADMIN. You can run this program as root, or use a user-namespace, or set it to SUID ");
     }
 
     Ok(())
