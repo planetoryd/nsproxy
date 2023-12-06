@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::anyhow;
 use daggy::{
     petgraph::{
         visit::{EdgeRef, IntoEdgesDirected, IntoNodeReferences},
@@ -26,9 +27,8 @@ use crate::{
 
 pub trait ServiceM: Sized {
     type Ctx<'p>;
-    async fn new() -> Result<Self>;
     /// Run this before any starts
-    async fn reload(&self, ctx: Self::Ctx<'_>) -> Result<()>;
+    async fn reload(&self, ctx: &Self::Ctx<'_>) -> Result<()>;
     async fn ctx<'p>(&'p self) -> Result<Self::Ctx<'p>>;
 }
 
@@ -60,7 +60,7 @@ pub trait ItemPersist: MItem {
 /// Meaning as in systemd
 pub trait ItemAction: MItem {
     async fn stop(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>) -> Result<()>;
-    async fn start(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>)
+    async fn restart(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>)
         -> Result<()>;
 }
 
@@ -120,7 +120,7 @@ impl Graphs {
         let data = &self.data;
         for (id, _on) in data.node_references() {
             // Each node is the an NS where probe enters
-            let wdeps: NodeWDeps = self.nodewdeps(id);
+            let wdeps: NodeWDeps = self.nodewdeps(id)?;
             // Write the probe unit with Requires
             wdeps.write((), serv).await?;
             // Override all the configs each time we execute a graph
@@ -128,7 +128,7 @@ impl Graphs {
         }
         Ok(())
     }
-    fn nodewdeps(&self, id: NodeI) -> NodeWDeps {
+    fn nodewdeps(&self, id: NodeI) -> Result<NodeWDeps> {
         let ed = self
             .data
             // A --push FD--> B
@@ -143,9 +143,9 @@ impl Graphs {
             .collect::<Vec<_>>();
         let srcnode = Indexed {
             id,
-            item: self.data[id].as_ref().unwrap(),
+            item: self.data[id].as_ref().ok_or(anyhow!("node does not exist"))?,
         };
         // Each node is the an NS where probe enters
-        (srcnode, ew)
+        Ok((srcnode, ew))
     }
 }

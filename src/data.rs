@@ -1,11 +1,12 @@
 use std::{
+    borrow::Cow,
     collections::{hash_map, HashMap, HashSet},
     default,
     net::SocketAddr,
-    path::PathBuf, borrow::Cow,
+    path::PathBuf,
 };
 
-use crate::{sys::NSEnter, paths::PathState};
+use crate::{paths::PathState, sys::NSEnter};
 
 use super::*;
 use derivative::Derivative;
@@ -20,7 +21,7 @@ use serde::{de::Visitor, Deserialize, Serialize};
 use tun::Layer;
 
 #[public]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct ExactNS<S> {
     unique: UniqueFile,
     source: S,
@@ -160,7 +161,7 @@ struct NSGroup<N: Validate> {
     pid: NSSlot<N, NSPid>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub enum NSSlot<N, K: NSTrait> {
     #[default]
     Absent,
@@ -193,7 +194,7 @@ defNS!(NSUts, CLONE_NEWUTS, "uts");
 defNS!(NSPid, CLONE_NEWPID, "pid");
 
 pub macro defNS($name:ident, $flag:ident, $path:expr) {
-    #[derive(Default, Debug, Serialize, Deserialize)]
+    #[derive(Default, Debug, Serialize, Deserialize, Clone, Copy)]
     pub struct $name;
     impl NSTrait for $name {
         const FLAG: CloneFlags = CloneFlags::$flag;
@@ -244,16 +245,21 @@ struct Graphs {
 #[public]
 impl Graphs {
     /// Attempt to add a new node
-    fn add_object(&mut self, pid: PidPath, paths: &PathState) -> Result<NodeI> {
+    /// Fork: do we enter the userns when mounting (by forking out)
+    fn add_object(&mut self, pid: PidPath, paths: &PathState, usermnt: Option<&ProcNS>) -> Result<NodeI> {
+        log::info!("Add object {pid:?}");
         let ns = ProcNS::key_ident(pid)?;
         let uf = ns.unique;
         match self.map.entry(uf) {
-            hash_map::Entry::Occupied(en) => {
-                Ok(*en.get())
-            }
+            hash_map::Entry::Occupied(en) => Ok(*en.get()),
             hash_map::Entry::Vacant(va) => {
                 let ix: NodeI = self.data.add_node(None);
-                let node = ProcNS::mount(pid, paths, ix)?;
+                // Always try unmount
+                ProcNS::umount(ix, paths)?;
+                let mut node = ProcNS::mount(pid, paths, ix)?;
+                if let Some(p) = usermnt {
+                    node.merge(p);
+                }
                 self.data[ix].replace(ObjectNode { main: node });
                 Ok(*va.insert(ix))
             }

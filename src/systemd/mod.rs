@@ -2,22 +2,27 @@
 //! https://www.freedesktop.org/software/systemd/man/systemctl.html
 
 use std::{
+    collections::HashSet,
     env::current_exe,
     fs::{create_dir_all, remove_file},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use daggy::NodeIndex;
 use systemd_zbus::{ManagerProxy, Mode::Replace};
 use tun::Layer;
+use zbus::Address;
 
 use super::*;
 use crate::{
     data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation},
     managed::{
-        Indexed, ItemAction, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, SrcNode,
+        Indexed, ItemAction, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, SrcDeps,
+        SrcNode,
     },
+    paths::PathState,
 };
 
 pub mod service;
@@ -46,6 +51,11 @@ impl<'k> MItem for SrcNode<'k> {
     type Serv = Systemd;
 }
 
+impl<'k> MItem for SrcDeps<'k> {
+    type Param = ();
+    type Serv = Systemd;
+}
+
 // Therefore, the items are different perspectives upon the graph, by which we peform actions.
 
 impl<'k> ItemRM for SrcNode<'k> {
@@ -56,12 +66,14 @@ impl<'k> ItemRM for SrcNode<'k> {
 }
 
 impl<'k> ItemAction for SrcNode<'k> {
-    async fn start(
+    async fn restart(
         &self,
         _serv: &Self::Serv,
         ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
     ) -> Result<()> {
-        ctx.start_unit(&self.service()?, Replace).await?;
+        let n = self.service()?;
+        log::info!("(Re)start unit {n}");
+        ctx.restart_unit(&n, Replace).await?;
         Ok(())
     }
     async fn stop(
@@ -69,7 +81,46 @@ impl<'k> ItemAction for SrcNode<'k> {
         _serv: &Self::Serv,
         ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
     ) -> Result<()> {
-        ctx.stop_unit(&self.service()?, Replace).await?;
+        let n = self.service()?;
+        log::info!("Stop unit {n}");
+        ctx.stop_unit(&n, Replace).await?;
+        Ok(())
+    }
+}
+
+pub fn units(ve: &SrcDeps<'_>) -> Result<HashSet<String>> {
+    let mut units = HashSet::new();
+    for Indexed { id, item } in ve {
+        let re = match item {
+            Relation::SendSocket(p) => &p.receiver,
+            Relation::SendTUN(p) => &p.receiver,
+        };
+        match re {
+            FDRecver::Systemd(se) => units.insert(se.to_owned()),
+            FDRecver::TUN2Proxy(pa) => units.insert(Socks2TUN::new(&pa, *id)?.service()?),
+            _ => false,
+        };
+    }
+    Ok(units)
+}
+
+impl<'k> ItemAction for SrcDeps<'k> {
+    async fn restart(
+        &self,
+        serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()> {
+        let units = units(self)?;
+        for s in units {
+            ctx.restart_unit(&s, Replace).await?;
+        }
+        Ok(())
+    }
+    async fn stop(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>) -> Result<()> {
+        let units = units(self)?;
+        for s in units {
+            ctx.stop_unit(&s, Replace).await?;
+        }
         Ok(())
     }
 }
@@ -119,12 +170,20 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
             .set("Description", format!("Probe in {:?}", place.id))
             .set("Requires", &deplist)
             .set("After", &deplist);
-        service.with_section(Some("Service")).set(
-            "ExecStart",
-            format!("{:?} probe {:?}", &serv.self_path, &place.id.index()),
-        );
+        service
+            .with_section(Some("Service"))
+            .set(
+                "ExecStart",
+                format!("{:?} probe {:?}", &serv.self_path, &place.id.index()),
+            )
+            .set("Type", "oneshot")
+            .set("RemainAfterExit", "yes")
+            .set("StandardOutput", "journal")
+            .set("StandardError", "journal")
+            .set("Environment", "RUST_BACKTRACE=1");
         let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
+        // Note: do not run jounralctl in the userns shell, or it won't show any logs
         Ok(())
     }
 }
@@ -165,8 +224,25 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
                 name: None,
             },
             receiver: data::FDRecver::TUN2Proxy(self.confpath.to_owned()),
-            listener: sunit,
+            listener: sfile,
         }))
+    }
+}
+
+impl<'b> ItemAction for Socks2TUN<'b> {
+    async fn restart(
+        &self,
+        serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()> {
+        let servname = self.service()?;
+        ctx.restart_unit(&servname, Replace).await?;
+        Ok(())
+    }
+    async fn stop(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>) -> Result<()> {
+        let servname = self.service()?;
+        ctx.stop_unit(&servname, Replace).await?;
+        Ok(())
     }
 }
 
@@ -178,24 +254,31 @@ impl<'b> ItemRM for Socks2TUN<'b> {
     }
 }
 
-impl ServiceM for Systemd {
-    type Ctx<'c> = ManagerProxy<'c>;
-    async fn new() -> Result<Self> {
-        let path = "/run/nsproxy/tun2proxy/".parse()?;
+#[public]
+impl Systemd {
+    async fn new(paths: &PathState, conn: impl Into<zbus::Connection>) -> Result<Self> {
+        let path = paths.tun2proxy();
         create_dir_all(&path)?;
-        let conn = zbus::Connection::system().await?;
+        let base = directories::BaseDirs::new().unwrap();
+        let systemd_unit = base.config_local_dir().join("systemd/user");
+        // create_dir_all(&systemd_unit);
         Ok(Self {
-            systemd_unit: "/etc/systemd/system/".parse()?,
+            systemd_unit,
             tun2proxy_socks: path,
             self_path: current_exe()?,
-            conn,
+            conn: conn.into(),
         })
     }
+}
+
+impl ServiceM for Systemd {
+    type Ctx<'c> = ManagerProxy<'c>;
     async fn ctx<'k>(&'k self) -> Result<Self::Ctx<'k>> {
         Ok(ManagerProxy::new(&self.conn).await?)
     }
-    async fn reload(&self, ctx: Self::Ctx<'_>) -> Result<()> {
+    async fn reload(&self, ctx: &Self::Ctx<'_>) -> Result<()> {
         ctx.reload().await?;
+        log::info!("Reloaded");
         Ok(())
     }
 }

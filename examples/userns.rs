@@ -33,10 +33,11 @@ fn main() -> Result<()> {
         "n" => {
             // Requires no root. This works.
             let u = Uid::from_raw(1000);
-            seteuid(u)?;
+            setresuid(u, u, u)?;
+            capctl::prctl::set_dumpable(true)?; // Oh shit WORKS
             unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
             let mut f = OpenOptions::new().write(true).open("/proc/self/uid_map")?;
-            f.write_all(b"0 1000 1")?; // map 0 (in user ns) to uid (outside)
+            f.write_all(b"0 1000 1")?; // map 0 (in user ns) to uid 1000 (outside)
         }
         _ => (),
     }

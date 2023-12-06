@@ -1,7 +1,7 @@
 use std::{
-    fs::create_dir_all,
+    fs::{create_dir_all, Permissions},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::Arc, os::unix::fs::PermissionsExt,
 };
 
 use crate::{
@@ -48,6 +48,8 @@ impl PathState {
     }
     fn create_dirs_priv(&self) -> Result<()> {
         create_dir_all(&self.priv_binds)?;
+        let perms = PermissionsExt::from_mode(0o777); // a+rwx
+        std::fs::set_permissions(&self.priv_binds, perms)?;
         Ok(())
     }
     fn create_dirs(&self) -> Result<()> {
@@ -70,9 +72,12 @@ impl PathState {
     fn userns(&self) -> UserNS {
         UserNS(&self)
     }
+    fn tun2proxy(&self) -> PathBuf {
+        self.config.join("tun2proxy")
+    }
 }
 
-pub struct Binds(PathBuf);
+pub struct Binds(pub PathBuf);
 
 // pass it through
 pub fn checked_path(p: PathBuf) -> Result<PathBuf> {

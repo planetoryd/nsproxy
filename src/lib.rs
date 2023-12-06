@@ -22,6 +22,7 @@ pub use anyhow::Result;
 pub use fully_pub::fully_pub as public;
 pub use libc::pid_t; // make everything pub
 
+use nix::unistd::getpid;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -48,6 +49,12 @@ impl PidPath {
         match self {
             PidPath::N(n) => n.to_string().into(),
             PidPath::Selfproc => "self".into(),
+        }
+    }
+    fn to_n(&self) -> Self {
+        match self {
+            PidPath::Selfproc => Self::N(getpid().as_raw()),
+            k => *k,
         }
     }
 }

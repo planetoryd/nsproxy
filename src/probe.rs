@@ -33,7 +33,8 @@ impl PassFD<TUNC> {
         if let Some(na) = &self.creation.name {
             conf.name(na);
         }
-        let dev = tun::create(&conf)?;
+        let mut dev = tun::create(&conf)?;
+        dev.persist()?;
         self.connect_and_pass(&dev)?;
         Ok(())
     }
@@ -55,6 +56,7 @@ impl PassFD<SocketC> {
 
 impl<K> PassFD<K> {
     pub fn connect_and_pass(&self, fd: &impl AsRawFd) -> Result<()> {
+        log::info!("connect {:?}", &self.listener);
         let conn = UnixStream::connect(&self.listener)?;
         conn.send_fd(fd.as_raw_fd())?;
 

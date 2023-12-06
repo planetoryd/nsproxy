@@ -1,8 +1,8 @@
 //! Misc low-level code
 
 use std::{
-    fs::{create_dir, create_dir_all, remove_dir_all, remove_file, File, OpenOptions},
-    io::{Read, Write},
+    fs::{create_dir, create_dir_all, remove_dir_all, remove_file, File, FileType, OpenOptions},
+    io::{BufRead, BufReader, Read, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     path::PathBuf,
     process::exit,
@@ -12,7 +12,7 @@ use std::{
 use amplify::default;
 use anyhow::{bail, ensure};
 use daggy::NodeIndex;
-use libc::{pid_t, stat, syscall};
+use libc::{pid_t, stat, syscall, uid_t};
 use nsproxy_common::Validate;
 
 use super::*;
@@ -24,8 +24,8 @@ use crate::{
 use nix::{
     mount::{mount, umount, MsFlags},
     sched::{setns, unshare, CloneFlags},
-    sys::{signal::kill, stat::fstat},
-    unistd::{fork, setresgid, setresuid, setuid, ForkResult, Gid, Uid, getuid, seteuid},
+    sys::{signal::kill, stat::fstat, wait::waitpid},
+    unistd::{fork, getuid, seteuid, setresgid, setresuid, setuid, ForkResult, Gid, Pid, Uid},
 };
 
 use std::{mem::size_of, os::fd::RawFd};
@@ -39,15 +39,15 @@ use nix::{
 
 #[public]
 impl<K: NSTrait> NSSlot<ExactNS<PathBuf>, K> {
-    fn mount(pid: PidPath, binds: &Binds) -> Result<Self> {
+    fn mount(mut pid: PidPath, binds: &Binds) -> Result<Self> {
         let name = K::NAME;
+        pid = pid.to_n();
         let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", name]
             .iter()
             .collect();
         let stat = nix::sys::stat::stat(&path)?;
         let bindat = binds.ns(name);
         let _ = File::create(&bindat)?;
-        dbg!(&path, &bindat);
         mount(
             Some(&path),
             &bindat,
@@ -80,6 +80,17 @@ pub macro ns_call( $group:ident, $func:ident,[$($name:ident),*] ) {
 
 #[public]
 impl ProcNS {
+    fn merge(&mut self, other: &Self) {
+        match self {
+            ProcNS::PidFd(p) => todo!(),
+            ProcNS::ByPath(p) => {
+                if let ProcNS::ByPath(o) = other {
+                    p.user = o.user.clone();
+                    p.mnt = o.mnt.clone();
+                }
+            }
+        }
+    }
     /// Pin down namespaces of a process.
     fn mount(pid: PidPath, paths: &PathState, id: NodeI) -> Result<Self> {
         let mut nsg: NSGroup<ExactNS<PathBuf>> = NSGroup::default();
@@ -87,6 +98,42 @@ impl ProcNS {
         mount_by_pid!(pid, &binds, nsg, [net, uts, pid]);
 
         Ok(Self::ByPath(nsg))
+    }
+    /// Umount all namespaces and remove the dir
+    fn umount(id: NodeI, paths: &PathState) -> Result<()> {
+        let binds = paths.mount(id)?.0;
+        for e in std::fs::read_dir(&binds)? {
+            let e = e?;
+            let p = e.path();
+            let rx = umount(&p);
+            match rx {
+                Err(no) => {
+                    match no {
+                        Errno::EINVAL => {
+                            // its not mounted
+                            // but still weird because we tend to hold the contract
+                            // that a file exists ==> it is mounted
+                            log::warn!("EINVAL umount {:?}", &p);
+                        }
+                        k => return Err(k.into()),
+                    }
+                }
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+    fn rmall(paths: &PathState) -> Result<()> {
+        for dir in std::fs::read_dir(&paths.binds)? {
+            let dir = dir?;
+            if dir.file_type()?.is_dir() {
+                let pa: Result<u32, _> = dir.file_name().to_string_lossy().parse();
+                if let Ok(id) = pa {
+                    Self::umount(id.into(), paths)?;
+                }
+            }
+        }
+        Ok(())
     }
     /// Identify the key as in the map
     fn key_ident(pid: PidPath) -> Result<ExactNS<PathBuf>> {
@@ -247,11 +294,23 @@ fn sockpairfork() -> Result<()> {
 
 #[public]
 impl<'p> UserNS<'p> {
-    fn mapid(&self, uid: u32) -> Result<()> {
-
-        Ok(())
+    fn exist(&self) -> Result<bool> {
+        let mut f = OpenOptions::new().read(true).open("/proc/self/mountinfo")?;
+        let read = BufReader::new(&mut f);
+        let (u, p) = self.paths();
+        // They have to be UTF8 ?
+        let (u, p) = (u.to_str().unwrap(), p.to_str().unwrap());
+        for line in read.lines() {
+            let line = line?;
+            let m = line.contains(u) || line.contains(p);
+            if m {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
-    fn init(&self) -> Result<()> {
+    /// Depriv for the uid to which you want to map as root inside.
+    fn init(&self, depriv: uid_t) -> Result<()> {
         let private = self.0.private();
         create_dir_all(&private)?; // doesnt error when dir exists
         mount(
@@ -274,17 +333,18 @@ impl<'p> UserNS<'p> {
 
         match unsafe { fork() }? {
             ForkResult::Child => {
-                let u = Uid::from_raw(1000);
-                seteuid(u)?;
-
+                // TODO: what to do about gid_map ?
+                let u = Uid::from_raw(depriv);
+                setresuid(u, u, u)?;
+                // After setting EUID, flag dumpable is changed, and perms in /proc get changed too
+                capctl::prctl::set_dumpable(true)?;
                 unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
                 let mut f = OpenOptions::new().write(true).open("/proc/self/uid_map")?;
-                f.write_all(b"0 1000 1")?; // map 0 (in user ns) to uid (outside)
-        
-
+                f.write_all(format!("0 {u} 1").as_bytes())?; // map 0 (in user ns) to uid (outside) for range 1
                 sa.write_all(&[0])?;
                 let mut k: [u8; 1] = [0];
                 sa.read_exact(&mut k)?;
+                log::debug!("Subproc exit");
                 exit(0);
             }
             ForkResult::Parent { child } => {
@@ -310,7 +370,7 @@ impl<'p> UserNS<'p> {
                     MsFlags::MS_BIND,
                     None::<&str>,
                 )?;
-                sa.write_all(&[0])?;
+                sb.write_all(&[0])?;
                 log::info!("UserNS inited")
             }
         }
@@ -381,7 +441,7 @@ fn test_userns() -> Result<()> {
     let path = PathState::default()?;
     let usern = UserNS(&path);
     dbg!(usern.paths());
-    usern.init()?;
+    usern.init(1000)?;
 
     Ok(())
 }
@@ -428,8 +488,22 @@ unsafe fn mount_setattr(
 pub fn check_capsys() -> Result<()> {
     let caps = capctl::CapState::get_current().unwrap();
     if !caps.effective.has(capctl::Cap::SYS_ADMIN) {
-        bail!("requires CAP_SYS_ADMIN. You can run this program as root, or use a user-namespace, or set it to SUID ");
+        bail!("requires CAP_SYS_ADMIN. Use `sudo nsproxy`");
     }
 
     Ok(())
+}
+
+pub fn your_shell(specify: Option<String>) -> Result<Option<String>> {
+    Ok(match specify {
+        Some(k) => Some(k),
+        None => {
+            let d = std::env::var("SHELL")?;
+            if d.is_empty() {
+                None
+            } else {
+                Some(d)
+            }
+        }
+    })
 }

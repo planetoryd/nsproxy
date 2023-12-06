@@ -8,7 +8,7 @@ use std::io::Read;
 use super::*;
 use crate::{
     data::{
-        ExactNS, Graphs, Ix, NodeI, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode,
+        ExactNS, Graphs, Ix, NodeI, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode, ObjectNS,
     },
     paths::{PathState, Paths},
 };
@@ -22,22 +22,24 @@ use daggy::{
 use nsproxy_common::Validate;
 use serde_json::{from_str, to_string_pretty};
 
-/// This is an invariant of [ObjectGraph]
-pub fn retain_object_graph(og: &mut ObjectGraph) -> Result<()> {
-    og.retain_nodes(|n, k| {
-        if let Some(k) = &n[k] {
-            k.validate().is_ok()
-        } else {
-            false
-        }
-    });
-    Ok(())
-}
-
 impl Graphs {
+    pub fn retain(&mut self) -> Result<()> {
+        self.data.retain_nodes(|n, k| {
+            if let Some(k) = &n[k] { 
+                if k.validate().is_ok() {
+                    true 
+                } else {
+                    self.map.remove(&k.main.key());
+                    false
+                }
+            } else {
+                false
+            }
+        });
+        Ok(())
+    }
     pub fn load(st: &str) -> Result<Self> {
-        let mut g: Self = from_str(st)?;
-        retain_object_graph(&mut g.data)?;
+        let g: Self = from_str(st)?;
         Ok(g)
     }
     pub fn load_file(path: &PathState) -> Result<Self> {
@@ -52,7 +54,8 @@ impl Graphs {
         }
     }
     pub fn dump_file(&self, path: &PathState) -> Result<()> {
-        let file = std::fs::File::open(path.state.join("graphs.json"))?;
+        log::info!("Write graphs");
+        let file = std::fs::File::create(path.state.join("graphs.json"))?;
         serde_json::to_writer_pretty(&file, self)?;
         Ok(())
     }
