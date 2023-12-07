@@ -38,6 +38,7 @@ fn main() -> Result<()> {
             unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
             let mut f = OpenOptions::new().write(true).open("/proc/self/uid_map")?;
             f.write_all(b"0 1000 1")?; // map 0 (in user ns) to uid 1000 (outside)
+            // It's only possible to map a single line with this approach
         }
         _ => (),
     }

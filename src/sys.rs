@@ -309,8 +309,8 @@ impl<'p> UserNS<'p> {
         }
         Ok(false)
     }
-    /// Depriv for the uid to which you want to map as root inside.
-    fn init(&self, depriv: uid_t) -> Result<()> {
+    /// A process with euid being owner may enter the user NS without the cap
+    fn init(&self, owner: uid_t) -> Result<()> {
         let private = self.0.private();
         create_dir_all(&private)?; // doesnt error when dir exists
         mount(
@@ -333,18 +333,16 @@ impl<'p> UserNS<'p> {
 
         match unsafe { fork() }? {
             ForkResult::Child => {
-                // TODO: what to do about gid_map ?
-                let u = Uid::from_raw(depriv);
+                let u = Uid::from_raw(owner);
                 setresuid(u, u, u)?;
                 // After setting EUID, flag dumpable is changed, and perms in /proc get changed too
                 capctl::prctl::set_dumpable(true)?;
+                log::info!("unshare, owner uid is {u}");
                 unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
-                let mut f = OpenOptions::new().write(true).open("/proc/self/uid_map")?;
-                f.write_all(format!("0 {u} 1").as_bytes())?; // map 0 (in user ns) to uid (outside) for range 1
-                sa.write_all(&[0])?;
+                sa.write_all(&[0])?; // unshared
+
                 let mut k: [u8; 1] = [0];
                 sa.read_exact(&mut k)?;
-                log::debug!("Subproc exit");
                 exit(0);
             }
             ForkResult::Parent { child } => {
@@ -355,7 +353,14 @@ impl<'p> UserNS<'p> {
                     .iter()
                     .collect();
                 let mut k: [u8; 1] = [0];
-                sb.read_exact(&mut k)?;
+
+                sb.read_exact(&mut k)?; // unshared
+                let mut f = OpenOptions::new().write(true).open(format!("/proc/{child}/uid_map"))?;
+                // f.write_all(format!("{u} {u} 1").as_bytes())?; // map uid (in user ns) to uid (outside) for range 1
+                f.write_all(format!("0 0 4294967295").as_bytes())?; 
+                let mut f = OpenOptions::new().write(true).open(format!("/proc/{child}/gid_map"))?;
+                f.write_all(format!("0 0 4294967295").as_bytes())?; 
+          
                 mount(
                     Some(&puser),
                     &self.0.user(),

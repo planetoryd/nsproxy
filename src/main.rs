@@ -10,13 +10,14 @@ use amplify::empty;
 use anyhow::anyhow;
 use capctl::prctl;
 use clap::{Parser, Subcommand};
-use clone3::Clone3;
 use daggy::petgraph::data::Build;
+use ipnetwork::IpNetwork;
 use libc::SIGTERM;
 use log::LevelFilter::Debug;
+use netlink_ops::netlink::{nl_ctx, NLHandle, NLStateful, NLWrapped};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
-use nix::unistd::{fork, getpid, getppid, sethostname, ForkResult, Pid};
+use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
 use nsproxy::data::{Graphs, NodeI, ObjectNode, PassFD, ProcNS, Relation, TUNC};
 use nsproxy::managed::{Indexed, ItemAction, ItemCreate, NodeWDeps, ServiceM, Socks2TUN, SrcNode};
 use nsproxy::paths::{PathState, Paths};
@@ -77,6 +78,9 @@ enum Commands {
     Userns {
         #[arg(long, short)]
         rmall: bool,
+        /// You can not set to UIDs that have not been mapped in uid_map
+        #[arg(long, short)]
+        uid: u32,
     },
 }
 
@@ -95,10 +99,11 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::SOCKS2TUN {
             pid,
-            tun2proxy,
+            mut tun2proxy,
             cmd,
         } => {
             let capsys = check_capsys();
+            tun2proxy = tun2proxy.canonicalize()?;
             // Connect and authenticate to systemd before entering userns
             let pre = rt.block_on(async { zbus::Connection::session().await })?;
             let mut uns = None;
@@ -159,7 +164,7 @@ fn main() -> Result<()> {
                 let serv = systemd::Systemd::new(&paths, pre).await?;
                 let ctx = serv.ctx().await?;
                 // TODO: TUN2proxy when TAP
-                let rel = socks2t.write(Layer::L2, &serv).await?;
+                let rel = socks2t.write(Layer::L3, &serv).await?;
                 graphs.data[edge].replace(rel);
                 graphs.dump_file(&paths)?;
                 graphs.write_probes(&serv).await?;
@@ -184,6 +189,29 @@ fn main() -> Result<()> {
                     Relation::SendTUN(p) => p.pass()?,
                 }
             }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                let wh = NLWrapped::new(NLHandle::new_self_proc_tokio()?);
+                // let mut nl = NLStateful::new(&wh);
+                // nl.fill().await?;
+                let li = wh.h().get_link("tun0".parse()?).await?;
+                wh.h()
+                    .ip_add_route(li.header.index, None, Some(true))
+                    .await?;
+                wh.h()
+                    .ip_add_route(li.header.index, None, Some(false))
+                    .await?;
+                wh.h()
+                    .add_addr_dev(IpNetwork::new("100.64.0.2".parse()?, 16)?, li.header.index)
+                    .await?;
+                // It must have a source addr so the TUN driver can send packets back.
+                // It shows as 0.0.0.0 if there isn't an ddress
+                let li = wh.h().get_link("lo".parse()?).await?;
+                wh.h().set_link_up(li.header.index).await?;
+                aok!()
+            })?;
         }
         Commands::TUN2proxy { conf } => {
             // Setns, recv FD, start daemon
@@ -197,6 +225,7 @@ fn main() -> Result<()> {
             let devfd: RawFd = conn.recv_fd()?;
             log::info!("Got FD");
             let args = tun2proxy::load_conf(conf)?;
+            log::info!("{:?}", args);
             tun2proxy::tuntap(args, devfd)?;
         }
         Commands::Watch {} => {}
@@ -212,19 +241,22 @@ fn main() -> Result<()> {
                 if usern.exist()? {
                     log::error!("UserNS has already been initialized");
                 } else {
-                    let depriv = std::env::var("SUDO_UID")?.parse()?;
-                    usern.init(depriv)?;
+                    let owner = std::env::var("SUDO_UID")?.parse()?;
+                    usern.init(owner)?;
                     log::info!("{:?}", usern.paths());
                 }
             }
         }
-        Commands::Userns { rmall } => {
+        Commands::Userns { rmall, uid } => {
             let usern = UserNS(&paths);
             if usern.exist()? {
                 usern.procns()?.enter()?;
                 if rmall {
                     ProcNS::rmall(&paths)?;
                 } else {
+                    // This process gains full caps after setns, so we can do whatever.
+                    let u = Uid::from_raw(uid);
+                    setresuid(u, u, u)?;
                     let mut cmd =
                         Command::new(your_shell(None)?.ok_or(anyhow!("specify env var SHELL"))?);
                     cmd.spawn()?.wait()?;

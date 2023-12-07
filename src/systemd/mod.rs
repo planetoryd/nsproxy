@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashSet,
-    env::current_exe,
+    env::{current_exe, current_dir},
     fs::{create_dir_all, remove_file},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -211,9 +211,14 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
             .set("Description", format!("TUN2Proxy of {:?}", &stem))
             .set("Requires", &selfsock)
             .set("After", &selfsock);
+        assert!(self.confpath.exists());
         service.with_section(Some("Service")).set(
             "ExecStart",
-            format!("{:?} tun2proxy {:?}", &serv.self_path, &self.confpath),
+            format!(
+                "{:?} tun2proxy {:?}",
+                &serv.self_path,
+                &self.confpath
+            ),
         );
         let servname = self.service()?;
         let servpath = serv.systemd_unit.join(&servname);

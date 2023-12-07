@@ -1,5 +1,5 @@
 {
     "url": "socks5://127.0.0.1:9909",
-    "dns": "Proxy",
+    "dns": "Handled",
     "tap": false
 }

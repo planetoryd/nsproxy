@@ -35,9 +35,9 @@ fn emptyconf() -> Result<()> {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub enum TUN2DNS {
-    /// Resolve names by the proxy. This is usually better
+    /// Resolve names *by* the proxy. This is usually better
     #[default]
-    Proxy,
+    Handled,
     /// Resolve names *through* the proxy. 
     /// It does DNS lookups through the proxy, the channel it provides.
     Upstream(IpAddr),
@@ -47,7 +47,7 @@ pub fn tuntap(args: TUN2Proxy, dev: RawFd) -> Result<()> {
     let proxy = Proxy::from_url(&args.url)?;
     let mut opts = Options::new();
     match args.dns {
-        TUN2DNS::Proxy => opts = opts.with_virtual_dns(),
+        TUN2DNS::Handled => opts = opts.with_virtual_dns(),
         TUN2DNS::Upstream(a) => opts = opts.with_dns_over_tcp().with_dns_addr(Some(a)),
     }
     if args.ipv6 {

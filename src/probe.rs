@@ -34,6 +34,8 @@ impl PassFD<TUNC> {
             conf.name(na);
         }
         let mut dev = tun::create(&conf)?;
+        dev.enabled(true)?;
+        dev.set_nonblock()?;
         dev.persist()?;
         self.connect_and_pass(&dev)?;
         Ok(())
