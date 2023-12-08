@@ -60,8 +60,11 @@ pub trait ItemPersist: MItem {
 /// Meaning as in systemd
 pub trait ItemAction: MItem {
     async fn stop(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>) -> Result<()>;
-    async fn restart(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>)
-        -> Result<()>;
+    async fn restart(
+        &self,
+        serv: &Self::Serv,
+        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
+    ) -> Result<()>;
 }
 
 pub trait ItemCreate: MItem {
@@ -143,7 +146,13 @@ impl Graphs {
             .collect::<Vec<_>>();
         let srcnode = Indexed {
             id,
-            item: self.data[id].as_ref().ok_or(anyhow!("node does not exist"))?,
+            item: self
+                .data
+                .node_weight(id)
+                .as_ref()
+                .ok_or(anyhow!("node does not exist"))?
+                .as_ref()
+                .unwrap(),
         };
         // Each node is the an NS where probe enters
         Ok((srcnode, ew))

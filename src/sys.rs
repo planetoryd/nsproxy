@@ -1,7 +1,11 @@
 //! Misc low-level code
 
 use std::{
-    fs::{create_dir, create_dir_all, remove_dir_all, remove_file, File, FileType, OpenOptions},
+    collections::HashMap,
+    fs::{
+        create_dir, create_dir_all, read_dir, remove_dir_all, remove_file, File, FileType,
+        OpenOptions,
+    },
     io::{BufRead, BufReader, Read, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     path::PathBuf,
@@ -98,6 +102,27 @@ impl ProcNS {
         mount_by_pid!(pid, &binds, nsg, [net, uts, pid]);
 
         Ok(Self::ByPath(nsg))
+    }
+    /// Remember to enter userns (usually) or mounts wont be visible
+    fn mounted(paths: &PathState, id: NodeI) -> Result<HashMap<Ix, NSGroup<ExactNS<PathBuf>>>> {
+        let mut map = HashMap::new();
+        let binds = paths.mount(id)?.0;
+        let it = proc_mounts::MountIter::new()?;
+        let maps = nstypes();
+        for m in it {
+            let m = m?;
+            let path = m.source;
+            if m.fstype == "nsfs" && path.starts_with(&binds) {
+                let ns = path.file_name().unwrap().to_string_lossy();
+                let id = path.parent().unwrap().file_name().unwrap();
+                let id: Ix = id.to_string_lossy().parse()?;
+                let mut g = NSGroup::<_>::default();
+                let p = maps[ns.as_ref()];
+                p(&mut g, ExactNS::<PathBuf>::from(path)?);
+                map.insert(id, g);
+            }
+        }
+        Ok(map)
     }
     /// Umount all namespaces and remove the dir
     fn umount(id: NodeI, paths: &PathState) -> Result<()> {
@@ -355,12 +380,16 @@ impl<'p> UserNS<'p> {
                 let mut k: [u8; 1] = [0];
 
                 sb.read_exact(&mut k)?; // unshared
-                let mut f = OpenOptions::new().write(true).open(format!("/proc/{child}/uid_map"))?;
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .open(format!("/proc/{child}/uid_map"))?;
                 // f.write_all(format!("{u} {u} 1").as_bytes())?; // map uid (in user ns) to uid (outside) for range 1
-                f.write_all(format!("0 0 4294967295").as_bytes())?; 
-                let mut f = OpenOptions::new().write(true).open(format!("/proc/{child}/gid_map"))?;
-                f.write_all(format!("0 0 4294967295").as_bytes())?; 
-          
+                f.write_all(format!("0 0 4294967295").as_bytes())?;
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .open(format!("/proc/{child}/gid_map"))?;
+                f.write_all(format!("0 0 4294967295").as_bytes())?;
+
                 mount(
                     Some(&puser),
                     &self.0.user(),
@@ -503,11 +532,11 @@ pub fn your_shell(specify: Option<String>) -> Result<Option<String>> {
     Ok(match specify {
         Some(k) => Some(k),
         None => {
-            let d = std::env::var("SHELL")?;
-            if d.is_empty() {
-                None
+            let d = std::env::var("SHELL");
+            if d.is_err() {
+                Some("fish".to_owned())
             } else {
-                Some(d)
+                Some(d.unwrap())
             }
         }
     })

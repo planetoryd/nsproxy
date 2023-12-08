@@ -25,7 +25,7 @@ fn main() -> Result<()> {
         "i" => {
             // Unshare and mount, requires root
             // Weird it doesn't work
-            usern.init()?;
+            // usern.init()?;
         }
         "s" => {
             usern.procns()?.enter()?;

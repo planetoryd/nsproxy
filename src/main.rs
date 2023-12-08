@@ -1,20 +1,25 @@
 #![feature(decl_macro)]
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::Write;
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::process::{exit, Command, Stdio};
 use std::{fs::File, io::Read, os::fd::AsFd, path::PathBuf};
 
-use amplify::empty;
 use anyhow::anyhow;
 use capctl::prctl;
 use clap::{Parser, Subcommand};
 use daggy::petgraph::data::Build;
 use ipnetwork::IpNetwork;
 use libc::SIGTERM;
-use log::LevelFilter::Debug;
-use netlink_ops::netlink::{nl_ctx, NLHandle, NLStateful, NLWrapped};
+use log::LevelFilter::{self, Debug};
+use netlink_ops::netlink::{nl_ctx, NLHandle, NLStateful, NLWrapped, VethConn, NS};
+use netlink_ops::rtnetlink::netlink_proto::{new_connection_from_socket, NetlinkCodec};
+use netlink_ops::rtnetlink::netlink_sys::protocols::NETLINK_ROUTE;
+use netlink_ops::rtnetlink::netlink_sys::{AsyncSocket, Socket, TokioSocket};
+use netlink_ops::rtnetlink::Handle;
+use netlink_ops::state::{Existence, ExpCollection};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
@@ -80,13 +85,26 @@ enum Commands {
         rmall: bool,
         /// You can not set to UIDs that have not been mapped in uid_map
         #[arg(long, short)]
-        uid: u32,
+        uid: Option<u32>,
+        #[arg(long, short)]
+        node: Option<Ix>,
+    },
+    Node {
+        id: Ix,
+        /// Command to run
+        cmd: Option<String>,
+    },
+    Veth {
+        #[arg(long, short)]
+        uid: Option<u32>,
+        /// Command to run
+        cmd: Option<String>,
     },
 }
 
 fn main() -> Result<()> {
     env_logger::builder()
-        .filter_level(Debug)
+        .filter_level(LevelFilter::Info)
         .parse_default_env()
         .init();
     let cli = Cli::parse();
@@ -247,7 +265,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Userns { rmall, uid } => {
+        Commands::Userns { rmall, uid, node } => {
             let usern = UserNS(&paths);
             if usern.exist()? {
                 usern.procns()?.enter()?;
@@ -255,8 +273,11 @@ fn main() -> Result<()> {
                     ProcNS::rmall(&paths)?;
                 } else {
                     // This process gains full caps after setns, so we can do whatever.
-                    let u = Uid::from_raw(uid);
-                    setresuid(u, u, u)?;
+                    if let Some(uid) = uid {
+                        let u = Uid::from_raw(uid);
+                        setresuid(u, u, u)?;
+                    }
+
                     let mut cmd =
                         Command::new(your_shell(None)?.ok_or(anyhow!("specify env var SHELL"))?);
                     cmd.spawn()?.wait()?;
@@ -265,6 +286,19 @@ fn main() -> Result<()> {
                 log::error!("UserNS does not exist");
             }
         }
+        Commands::Node { id, cmd } => {
+            let ix = NodeI::from(id);
+
+            let node = graphs
+                .data
+                .node_weight(ix)
+                .ok_or(anyhow!("Specified node does not exist"))?
+                .as_ref() // Second one is an invariant
+                .unwrap();
+            node.main.enter()?;
+            let mut cmd = Command::new(your_shell(None)?.ok_or(anyhow!("specify env var SHELL"))?);
+            cmd.spawn()?.wait()?;
+        }
         Commands::Info => {
             log::info!("{:?}", &paths);
             log::info!(
@@ -272,6 +306,95 @@ fn main() -> Result<()> {
                 paths.userns().paths(),
                 paths.userns().exist()?
             );
+        }
+        Commands::Veth { mut uid, cmd } => {
+            // sysctl net.ipv4.ip_forward=1
+            check_capsys()?;
+            let mut k = [0; 1];
+            let (mut sp, mut sc) = UnixStream::pair()?;
+            match unsafe { fork() }? {
+                ForkResult::Child => {
+                    unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
+                    sethostname("proxied")?;
+                    let nl = Socket::new(NETLINK_ROUTE)?;
+                    nl.set_non_blocking(true)?;
+                    sc.send_fd(nl.as_raw_fd())?;
+                    if uid.is_none() {
+                        let sudoid = std::env::var("SUDO_UID");
+                        if let Ok(id) = sudoid {
+                            uid = Some(id.parse()?);
+                        } else {
+                            uid = Some(1000)
+                        }
+                    }
+                    let u = Uid::from_raw(uid.unwrap());
+                    setresuid(u, u, u)?;
+                    // sp.write_all(&[0])?;
+                    // sp.read_exact(&mut k)?;
+                    prctl::set_pdeathsig(Some(SIGTERM))?;
+                    let mut cmd =
+                        Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
+                    cmd.spawn()?.wait()?;
+                }
+                ForkResult::Parent { child } => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    rt.block_on(async {
+                        let fd = sp.recv_fd()?;
+                        let (conn, h, _) =
+                            new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
+                                TokioSocket::from_raw_fd(fd)
+                            });
+                        rt.spawn(conn);
+                        let h = NLHandle {
+                            rawh: Handle::new(h),
+                            id: NS::from_path(format!("/proc/{child}/ns/net").parse()?)?,
+                        };
+                        let wh = NLWrapped::new(h);
+                        let mut nl_ch = NLStateful::new(&wh);
+
+                        let cnl = NLWrapped::new(NLHandle::new_self_proc_tokio()?);
+                        let mut nl = NLStateful::new(&cnl);
+                        nl_ch.fill().await?;
+                        nl.fill().await?;
+                        let mut addrset: HashSet<IpNetwork> = HashSet::default(); // find unused subnet
+                        {
+                            nl_ctx!(link, conn, nl_ch);
+                            conn.set_up(link.map.get_mut(&"lo".parse()?).unwrap().exist_mut()?)
+                                .await?;
+                            for (k, ex) in link.map {
+                                if let Existence::Exist(li) = ex {
+                                    match &li.addrs {
+                                        ExpCollection::Filled(addr) => {
+                                            addrset.extend(addr.keys().into_iter());
+                                        }
+                                        _ => (),
+                                    }
+                                }
+                            }
+                        }
+
+                        let vc = VethConn {
+                            subnet_veth: "100.67.0.0/24".parse()?,
+                            subnet6_veth: "fe80:2e::/24".parse()?,
+                            ip_va: "100.67.0.1/24".parse()?,
+                            ip_vb: "100.67.0.2/24".parse()?,
+                            ip6_va: "fe80:2e::1/24".parse()?,
+                            ip6_vb: "fe80:2e::2/24".parse()?,
+                            key: "ve".parse()?,
+                        };
+                        vc.apply(&mut nl_ch, &mut nl).await?;
+                        let mut nl_ch = NLStateful::new(&wh);
+                        let mut nl = NLStateful::new(&cnl);
+                        nl_ch.fill().await?;
+                        nl.fill().await?;
+                        vc.apply_addr_up(&mut nl_ch, &mut nl).await?;
+                        aok!()
+                    })?;
+                    waitpid(Some(Pid::from_raw(-1)), None)?;
+                }
+            }
         }
     }
     Ok(())

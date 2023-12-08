@@ -9,6 +9,7 @@ use std::{
 use crate::{paths::PathState, sys::NSEnter};
 
 use super::*;
+use amplify::confinement::Collection;
 use derivative::Derivative;
 
 use netlink_ops::errors::ProgrammingError;
@@ -187,18 +188,42 @@ impl<N: NSEnter, K: NSTrait> NSSlot<N, K> {
     }
 }
 
-defNS!(NSUser, CLONE_NEWUSER, "user");
-defNS!(NSMnt, CLONE_NEWNS, "mnt");
-defNS!(NSNet, CLONE_NEWNET, "net");
-defNS!(NSUts, CLONE_NEWUTS, "uts");
-defNS!(NSPid, CLONE_NEWPID, "pid");
+defNS!(NSUser, CLONE_NEWUSER, "user", user);
+defNS!(NSMnt, CLONE_NEWNS, "mnt", mnt);
+defNS!(NSNet, CLONE_NEWNET, "net", net);
+defNS!(NSUts, CLONE_NEWUTS, "uts", uts);
+defNS!(NSPid, CLONE_NEWPID, "pid", pid);
 
-pub macro defNS($name:ident, $flag:ident, $path:expr) {
+pub fn nstypes<N: Validate>() -> HashMap<&'static str, fn(&mut NSGroup<N>, N)> {
+    let mut map = HashMap::new();
+    map.insert(
+        NSUser::NAME,
+        NSUser::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+    );
+    map.insert(
+        NSMnt::NAME,
+        NSMnt::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+    );
+    map.insert(
+        NSNet::NAME,
+        NSNet::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+    );
+    map.insert(
+        NSUts::NAME,
+        NSUts::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+    );
+    map
+}
+
+pub macro defNS($name:ident, $flag:ident, $path:expr, $k:ident) {
     #[derive(Default, Debug, Serialize, Deserialize, Clone, Copy)]
     pub struct $name;
     impl NSTrait for $name {
         const FLAG: CloneFlags = CloneFlags::$flag;
         const NAME: &'static str = $path;
+        fn set<N: Validate>(g: &mut NSGroup<N>, v: N) {
+            g.$k = NSSlot::Provided(v, Self);
+        }
     }
 }
 
@@ -214,6 +239,7 @@ impl<N: Validate, K: NSTrait> Validate for NSSlot<N, K> {
 pub trait NSTrait: Default {
     const FLAG: CloneFlags;
     const NAME: &'static str;
+    fn set<N: Validate>(g: &mut NSGroup<N>, v: N);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -240,13 +266,19 @@ struct Graphs {
     data: ObjectGraph,
     /// Maps objects to NetNS files
     map: ObjectNS,
+    
 }
 
 #[public]
 impl Graphs {
     /// Attempt to add a new node
     /// Fork: do we enter the userns when mounting (by forking out)
-    fn add_object(&mut self, pid: PidPath, paths: &PathState, usermnt: Option<&ProcNS>) -> Result<NodeI> {
+    fn add_object(
+        &mut self,
+        pid: PidPath,
+        paths: &PathState,
+        usermnt: Option<&ProcNS>,
+    ) -> Result<NodeI> {
         log::info!("Add object {pid:?}");
         let ns = ProcNS::key_ident(pid)?;
         let uf = ns.unique;
