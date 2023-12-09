@@ -8,6 +8,7 @@ workspace = { members = [
     "netlink-sys",
     "rtnetlink",
     "rustables",
+    "id_alloc",
 ] }
 
 [package]
@@ -63,3 +64,4 @@ directories = "5.0.1"
 ipnetwork = "0.20.0"
 uzers = "0.11.3"
 proc-mounts = "0.3.0"
+id_alloc = { path = "./id_alloc" }

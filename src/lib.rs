@@ -36,25 +36,3 @@ pub fn path_to_str(pa: &Path) -> Result<&str> {
 pub macro aok() {
     Ok::<(), anyhow::Error>(())
 }
-
-#[derive(Clone, Copy, Debug)]
-pub enum PidPath {
-    Selfproc,
-    N(i32),
-}
-
-#[public]
-impl PidPath {
-    fn to_str(&self) -> Cow<'static, str> {
-        match self {
-            PidPath::N(n) => n.to_string().into(),
-            PidPath::Selfproc => "self".into(),
-        }
-    }
-    fn to_n(&self) -> Self {
-        match self {
-            PidPath::Selfproc => Self::N(getpid().as_raw()),
-            k => *k,
-        }
-    }
-}

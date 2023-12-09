@@ -950,6 +950,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive-new"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d150dea618e920167e5973d70ae6ece4385b7164e0d799fe7c122dd0a5d912ad"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.39",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1665,6 +1676,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "id_alloc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "derivative",
+ "derive-new",
+ "ipnetwork 0.20.0",
+ "rangemap",
+ "thiserror",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2036,11 +2059,15 @@ dependencies = [
  "async-recursion",
  "bitflags 2.4.1",
  "derivative",
+ "derive-new",
  "fixed-map",
+ "fully_pub",
  "futures",
  "ipnetwork 0.20.0",
+ "libc",
  "log",
  "nix 0.26.4",
+ "nsproxy-common",
  "rtnetlink",
  "rustables",
  "serde",
@@ -2199,6 +2226,7 @@ dependencies = [
  "directories",
  "env_logger 0.10.1",
  "fully_pub",
+ "id_alloc",
  "ipnetwork 0.20.0",
  "libc",
  "libsystemd",
@@ -2230,6 +2258,12 @@ name = "nsproxy-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "derivative",
+ "fully_pub",
+ "libc",
+ "nix 0.27.1",
+ "pidfd",
+ "serde",
 ]
 
 [[package]]
@@ -2601,6 +2635,12 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
 ]
+
+[[package]]
+name = "rangemap"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977b1e897f9d764566891689e642653e5ed90c6895106acd005eb4c1d0203991"
 
 [[package]]
 name = "redox_syscall"

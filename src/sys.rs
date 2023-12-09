@@ -210,47 +210,6 @@ impl ObjectNode {
     pub fn this() {}
 }
 
-impl From<stat> for UniqueFile {
-    fn from(value: stat) -> Self {
-        Self {
-            ino: value.st_ino,
-            dev: value.st_dev,
-        }
-    }
-}
-
-impl ExactNS<pid_t> {
-    /// Uses Pid FD
-    pub fn from(pid: pid_t) -> Result<Self> {
-        let f = unsafe { pidfd::PidFd::open(pid, 0) }?;
-        let fd = f.as_raw_fd();
-        let st = fstat(fd)?;
-        Ok(ExactNS {
-            unique: st.into(),
-            source: pid,
-        })
-    }
-}
-
-#[public]
-impl ExactNS<PathBuf> {
-    fn from(path: PathBuf) -> Result<Self> {
-        let stat = nix::sys::stat::stat(&path)?;
-        Ok(Self {
-            unique: stat.into(),
-            source: path,
-        })
-    }
-    pub fn from_pid(pid: PidPath, name: &str) -> Result<Self> {
-        let path = PathBuf::from(format!("/proc/{}/ns/{}", pid.to_str(), name));
-        let stat = nix::sys::stat::stat(&path)?;
-        Ok(Self {
-            unique: stat.into(),
-            source: path,
-        })
-    }
-}
-
 impl NSEnter for ExactNS<PathBuf> {
     fn enter(&self, f: CloneFlags) -> Result<()> {
         let fd = File::open(&self.source)?;
@@ -261,31 +220,6 @@ impl NSEnter for ExactNS<PathBuf> {
 
 pub trait NSEnter {
     fn enter(&self, f: CloneFlags) -> Result<()>;
-}
-
-impl UniqueFile {
-    fn validate(&self, fst: stat) -> Result<()> {
-        ensure!(fst.st_ino == self.ino && fst.st_dev == self.dev);
-        Ok(())
-    }
-}
-
-impl Validate for ExactNS<pid_t> {
-    fn validate(&self) -> Result<()> {
-        let f = unsafe { pidfd::PidFd::open(self.source, 0) }?;
-        let fd = f.as_raw_fd();
-        let st = fstat(fd)?;
-        self.unique.validate(st)?;
-        Ok(())
-    }
-}
-
-impl Validate for ExactNS<PathBuf> {
-    fn validate(&self) -> Result<()> {
-        let st = nix::sys::stat::stat(&self.source)?;
-        self.unique.validate(st)?;
-        Ok(())
-    }
 }
 
 impl Validate for ProcNS {

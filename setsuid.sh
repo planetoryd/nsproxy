@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
-sudo chown 0:0 ./target/debug/nsproxy
-sudo chmod +s ./target/debug/nsproxy
+sudo chown 0:0 ./target/debug/sproxy
+sudo chmod +s ./target/debug/sproxy

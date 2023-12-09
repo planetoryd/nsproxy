@@ -7,3 +7,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
+derivative = "2.2.0"
+fully_pub = "0.1.4"
+libc = "0.2.150"
+nix = { version = "0.27.1", features = ["sched", "net", "mount", "env", "hostname", "fs"] }
+pidfd = "0.2.4"
+serde = { version = "1.0.193", features = ["derive"] }

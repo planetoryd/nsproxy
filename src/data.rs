@@ -21,68 +21,7 @@ use daggy::{petgraph::stable_graph::StableDiGraph, Dag, EdgeIndex, NodeIndex};
 use serde::{de::Visitor, Deserialize, Serialize};
 use tun::Layer;
 
-#[public]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct ExactNS<S> {
-    unique: UniqueFile,
-    source: S,
-}
-
-/// We don't care about the means.
-/// We want to uniquely identify a file so we don't get into a wrong NS.
-/// IIRC ino and dev uniquely identifies a file
-#[public]
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, PartialOrd, Ord)]
-struct UniqueFile {
-    ino: u64,
-    dev: u64,
-}
-
-impl Serialize for UniqueFile {
-    fn serialize<S>(&self, serializer: S) -> std::prelude::v1::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let Self { ino, dev } = self;
-        serializer.serialize_str(&format!("{dev}_{ino}"))
-    }
-}
-
-impl<'de> Deserialize<'de> for UniqueFile {
-    fn deserialize<D>(deserializer: D) -> std::prelude::v1::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_str(UFVisitor)
-    }
-}
-
-struct UFVisitor;
-
-impl<'de> Visitor<'de> for UFVisitor {
-    type Value = UniqueFile;
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("string representation of UniqueFile")
-    }
-    fn visit_str<E>(self, v: &str) -> std::prelude::v1::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        let mut sp = v.split("_");
-        Ok(UniqueFile {
-            dev: sp
-                .next()
-                .ok_or(serde::de::Error::missing_field("dev"))?
-                .parse()
-                .map_err(serde::de::Error::custom)?,
-            ino: sp
-                .next()
-                .ok_or(serde::de::Error::missing_field("ino"))?
-                .parse()
-                .map_err(serde::de::Error::custom)?,
-        })
-    }
-}
+pub use nsproxy_common::*;
 
 #[public]
 #[derive(Serialize, Deserialize, Debug)]

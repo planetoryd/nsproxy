@@ -14,7 +14,7 @@ use daggy::petgraph::data::Build;
 use ipnetwork::IpNetwork;
 use libc::SIGTERM;
 use log::LevelFilter::{self, Debug};
-use netlink_ops::netlink::{nl_ctx, NLHandle, NLStateful, NLWrapped, VethConn, NS};
+use netlink_ops::netlink::{nl_ctx, NLDriver, NLHandle, VethConn};
 use netlink_ops::rtnetlink::netlink_proto::{new_connection_from_socket, NetlinkCodec};
 use netlink_ops::rtnetlink::netlink_sys::protocols::NETLINK_ROUTE;
 use netlink_ops::rtnetlink::netlink_sys::{AsyncSocket, Socket, TokioSocket};
@@ -29,9 +29,9 @@ use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::{check_capsys, your_shell, UserNS};
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
+use nsproxy_common::{ExactNS, PidPath};
 use passfd::FdPassingExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use tokio::signal::unix::SignalKind;
 use tun::Layer;
 
 #[derive(Parser)]
@@ -211,23 +211,23 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             rt.block_on(async {
-                let wh = NLWrapped::new(NLHandle::new_self_proc_tokio()?);
+                let wh = NLDriver::new(NLHandle::new_self_proc_tokio()?);
                 // let mut nl = NLStateful::new(&wh);
                 // nl.fill().await?;
-                let li = wh.h().get_link("tun0".parse()?).await?;
-                wh.h()
+                let li = wh.conn.get_link("tun0".parse()?).await?;
+                wh.conn
                     .ip_add_route(li.header.index, None, Some(true))
                     .await?;
-                wh.h()
+                wh.conn
                     .ip_add_route(li.header.index, None, Some(false))
                     .await?;
-                wh.h()
+                wh.conn
                     .add_addr_dev(IpNetwork::new("100.64.0.2".parse()?, 16)?, li.header.index)
                     .await?;
                 // It must have a source addr so the TUN driver can send packets back.
                 // It shows as 0.0.0.0 if there isn't an ddress
-                let li = wh.h().get_link("lo".parse()?).await?;
-                wh.h().set_link_up(li.header.index).await?;
+                let li = wh.conn.get_link("lo".parse()?).await?;
+                wh.conn.set_link_up(li.header.index).await?;
                 aok!()
             })?;
         }
@@ -347,15 +347,12 @@ fn main() -> Result<()> {
                                 TokioSocket::from_raw_fd(fd)
                             });
                         rt.spawn(conn);
-                        let h = NLHandle {
-                            rawh: Handle::new(h),
-                            id: NS::from_path(format!("/proc/{child}/ns/net").parse()?)?,
-                        };
-                        let wh = NLWrapped::new(h);
-                        let mut nl_ch = NLStateful::new(&wh);
-
-                        let cnl = NLWrapped::new(NLHandle::new_self_proc_tokio()?);
-                        let mut nl = NLStateful::new(&cnl);
+                        let h = NLHandle::new(
+                            Handle::new(h),
+                            ExactNS::from_pid(nsproxy_common::PidPath::N(child.as_raw()), "net")?,
+                        );
+                        let mut nl_ch = NLDriver::new(h);
+                        let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
                         nl_ch.fill().await?;
                         nl.fill().await?;
                         let mut addrset: HashSet<IpNetwork> = HashSet::default(); // find unused subnet
@@ -385,8 +382,8 @@ fn main() -> Result<()> {
                             key: "ve".parse()?,
                         };
                         vc.apply(&mut nl_ch, &mut nl).await?;
-                        let mut nl_ch = NLStateful::new(&wh);
-                        let mut nl = NLStateful::new(&cnl);
+                        let mut nl_ch = NLDriver::new(nl_ch.conn);
+                        let mut nl = NLDriver::new(nl.conn);
                         nl_ch.fill().await?;
                         nl.fill().await?;
                         vc.apply_addr_up(&mut nl_ch, &mut nl).await?;
