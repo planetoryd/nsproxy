@@ -13,3 +13,4 @@ libc = "0.2.150"
 nix = { version = "0.27.1", features = ["sched", "net", "mount", "env", "hostname", "fs"] }
 pidfd = "0.2.4"
 serde = { version = "1.0.193", features = ["derive"] }
+thiserror = "1.0.50"

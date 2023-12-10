@@ -205,7 +205,6 @@ struct Graphs {
     data: ObjectGraph,
     /// Maps objects to NetNS files
     map: ObjectNS,
-    
 }
 
 #[public]
@@ -218,12 +217,15 @@ impl Graphs {
         paths: &PathState,
         usermnt: Option<&ProcNS>,
     ) -> Result<NodeI> {
-        log::info!("Add object {pid:?}");
         let ns = ProcNS::key_ident(pid)?;
         let uf = ns.unique;
         match self.map.entry(uf) {
-            hash_map::Entry::Occupied(en) => Ok(*en.get()),
+            hash_map::Entry::Occupied(en) => {
+                log::info!("NS object {pid:?} exists");
+                Ok(*en.get())
+            }
             hash_map::Entry::Vacant(va) => {
+                log::info!("New NS object {pid:?}");
                 let ix: NodeI = self.data.add_node(None);
                 // Always try unmount
                 ProcNS::umount(ix, paths)?;

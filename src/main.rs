@@ -104,7 +104,7 @@ enum Commands {
 
 fn main() -> Result<()> {
     env_logger::builder()
-        .filter_level(LevelFilter::Info)
+        .filter_level(LevelFilter::Debug)
         .parse_default_env()
         .init();
     let cli = Cli::parse();
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
                     check_capsys()?;
                 }
             }
-            graphs.retain()?;
+            // graphs.prune()?;
             let (mut sp, mut sc) = UnixStream::pair()?;
             let mut buf = [0; 1];
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
@@ -255,6 +255,7 @@ fn main() -> Result<()> {
             paths.create_dirs_priv()?;
             if undo {
                 usern.deinit()?;
+                std::fs::remove_file(Graphs::path(&paths))?;
             } else {
                 if usern.exist()? {
                     log::error!("UserNS has already been initialized");

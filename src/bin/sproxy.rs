@@ -38,7 +38,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[command(
     author,
     version,
-    about = "an alternative to proxychains based on linux kernel namespaces"
+    about = "an alternative to proxychains based on linux kernel namespaces. SProxy is the SUID counterpart of NSProxy"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
                     let mut f = File::options()
                         .write(true)
                         .open("/proc/sys/net/ipv4/ping_group_range")?;
-                    f.write_all(b"0 4294967294")?;
+                    f.write_all(b"0 2147483647")?;
                     let nl = Socket::new(NETLINK_ROUTE)?;
                     nl.set_non_blocking(true)?;
                     sc.send_fd(nl.as_raw_fd())?;

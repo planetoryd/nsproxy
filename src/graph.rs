@@ -3,12 +3,13 @@
 //! Prevent proxy loops, and have a registry of NSes,
 //! Processes are managed by systemd.
 
-use std::io::Read;
+use std::{io::Read, path::PathBuf};
 
 use super::*;
 use crate::{
     data::{
-        ExactNS, Graphs, Ix, NodeI, ObjectGraph, ObjectNode, ProcNS, Relation, Route, RouteNode, ObjectNS,
+        ExactNS, Graphs, Ix, NodeI, ObjectGraph, ObjectNS, ObjectNode, ProcNS, Relation, Route,
+        RouteNode,
     },
     paths::{PathState, Paths},
 };
@@ -20,22 +21,28 @@ use daggy::{
     Dag,
 };
 use nsproxy_common::Validate;
+use nsproxy_common::ValidationErr;
+use petgraph::visit::IntoNodeReferences;
 use serde_json::{from_str, to_string_pretty};
 
 impl Graphs {
-    pub fn retain(&mut self) -> Result<()> {
-        self.data.retain_nodes(|n, k| {
-            if let Some(k) = &n[k] { 
-                if k.validate().is_ok() {
-                    true 
-                } else {
+    pub fn prune(&mut self) -> Result<()> {
+        let mut remove = Vec::new();
+        for (ni, node) in self.data.node_references() {
+            if let Some(k) = node {
+                let rx = k.validate();
+                if let Err(er) = rx {
+                    let expected = er.downcast::<ValidationErr>()?;
+                    log::info!("Removing NS node {}", k.main.key());
                     self.map.remove(&k.main.key());
-                    false
                 }
             } else {
-                false
+                remove.push(ni);
             }
-        });
+        }
+        for ni in remove {
+            self.data.remove_node(ni);
+        }
         Ok(())
     }
     pub fn load(st: &str) -> Result<Self> {
@@ -43,7 +50,7 @@ impl Graphs {
         Ok(g)
     }
     pub fn load_file(path: &PathState) -> Result<Self> {
-        let gp = path.state.join("graphs.json");
+        let gp = Self::path(path);
         if gp.exists() {
             let mut file = std::fs::File::open(&gp)?;
             let mut st = Default::default();
@@ -54,10 +61,14 @@ impl Graphs {
         }
     }
     pub fn dump_file(&self, path: &PathState) -> Result<()> {
-        log::info!("Write graphs");
-        let file = std::fs::File::create(path.state.join("graphs.json"))?;
+        let pa = Self::path(path);
+        log::info!("Dump graphs to {:?}", &pa);
+        let file = std::fs::File::create(&pa)?;
         serde_json::to_writer_pretty(&file, self)?;
         Ok(())
+    }
+    pub fn path(path: &PathState) -> PathBuf {
+        path.state.join("graphs.json")
     }
 }
 

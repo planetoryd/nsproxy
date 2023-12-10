@@ -1,11 +1,15 @@
 #![feature(associated_type_defaults)]
 
+use std::error::Error;
+use std::io::ErrorKind;
+use std::path::Display;
 use std::{borrow::Cow, os::fd::AsRawFd, path::PathBuf};
 
 use anyhow::ensure;
 use anyhow::Result;
 use fully_pub::fully_pub as public;
 use libc::stat;
+use nix::errno::Errno;
 use nix::{libc::pid_t, unistd::getpid};
 use serde::{de::Visitor, Deserialize, Serialize};
 
@@ -66,6 +70,13 @@ impl Serialize for UniqueFile {
     {
         let Self { ino, dev } = self;
         serializer.serialize_str(&format!("{dev}_{ino}"))
+    }
+}
+
+impl core::fmt::Display for UniqueFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { ino, dev } = self;
+        f.write_fmt(format_args!("{dev}_{ino}"))
     }
 }
 
@@ -162,26 +173,72 @@ impl ExactNS<PathBuf> {
 }
 
 impl UniqueFile {
-    fn validate(&self, fst: stat) -> Result<()> {
-        ensure!(fst.st_ino == self.ino && fst.st_dev == self.dev);
-        Ok(())
+    fn validate(&self, fst: stat) -> Result<(), ValidationErr> {
+        if fst.st_ino == self.ino && fst.st_dev == self.dev {
+            Ok(())
+        } else {
+            Err(ValidationErr::InoMismatch)
+        }
     }
+}
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+#[error("{:?}", self)]
+pub enum ValidationErr {
+    InoMismatch,
+    FileNonExist,
+    ProcessGone,
 }
 
 impl Validate for ExactNS<pid_t> {
     fn validate(&self) -> Result<()> {
-        let f = unsafe { pidfd::PidFd::open(self.source, 0) }?;
-        let fd = f.as_raw_fd();
-        let st = nix::sys::stat::fstat(fd)?;
-        self.unique.validate(st)?;
+        match unsafe { pidfd::PidFd::open(self.source, 0) } {
+            Ok(f) => {
+                let fd = f.as_raw_fd();
+                let st = nix::sys::stat::fstat(fd)?;
+                self.unique.validate(st)?;
+            }
+            Err(eno) => {
+                // WARN This should be "no such process", but who knows
+                if eno.raw_os_error() == Some(3) {
+                    return Err(ValidationErr::ProcessGone.into());
+                } else {
+                    return Err(eno.into());
+                }
+            }
+        }
+
         Ok(())
     }
 }
 
 impl Validate for ExactNS<PathBuf> {
     fn validate(&self) -> Result<()> {
-        let st = nix::sys::stat::stat(&self.source)?;
-        self.unique.validate(st)?;
+        match nix::sys::stat::stat(&self.source) {
+            Ok(st) => {
+                self.unique.validate(st)?;
+            }
+            Err(eno) => match eno {
+                Errno::ENOENT => {
+                    return Err(ValidationErr::FileNonExist.into());
+                }
+                _ => {
+                    return Err(eno.into());
+                }
+            },
+        }
+
         Ok(())
     }
+}
+
+#[test]
+fn test_f() {
+    let rx = nix::sys::stat::stat("./nonexist");
+    let _ = dbg!(rx);
+    let rx = unsafe { pidfd::PidFd::open(65532, 0) };
+    let ox = rx.err().unwrap();
+    let _ = dbg!(ox.raw_os_error());
 }

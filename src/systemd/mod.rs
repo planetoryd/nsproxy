@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashSet,
-    env::{current_exe, current_dir},
+    env::{current_dir, current_exe},
     fs::{create_dir_all, remove_file},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -183,6 +183,11 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
             .set("Environment", "RUST_BACKTRACE=1");
         let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
+        log::info!(
+            "Wrote probe unit to {:?}, with dependencies {:?}",
+            &servpath,
+            &deps
+        );
         // Note: do not run jounralctl in the userns shell, or it won't show any logs
         Ok(())
     }
@@ -212,17 +217,18 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
             .set("Requires", &selfsock)
             .set("After", &selfsock);
         assert!(self.confpath.exists());
-        service.with_section(Some("Service")).set(
-            "ExecStart",
-            format!(
-                "{:?} tun2proxy {:?}",
-                &serv.self_path,
-                &self.confpath
-            ),
-        );
+        service
+            .with_section(Some("Service"))
+            .set(
+                "ExecStart",
+                format!("{:?} tun2proxy {:?}", &serv.self_path, &self.confpath),
+            )
+            .set("Environment", "RUST_LOG=trace")
+            .set("Environment", "RUST_BACKTRACE=1");
         let servname = self.service()?;
         let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
+        log::info!("Wrote Tun2proxy unit to {:?}", &servpath);
         Ok(Relation::SendTUN(PassFD {
             creation: data::TUNC {
                 layer: param,
@@ -266,7 +272,7 @@ impl Systemd {
         create_dir_all(&path)?;
         let base = directories::BaseDirs::new().unwrap();
         let systemd_unit = base.config_local_dir().join("systemd/user");
-        // create_dir_all(&systemd_unit);
+        create_dir_all(&systemd_unit)?;
         Ok(Self {
             systemd_unit,
             tun2proxy_socks: path,
