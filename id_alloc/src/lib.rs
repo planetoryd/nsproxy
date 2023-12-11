@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use ipnetwork::{IpNetwork, IpNetworkError, Ipv4Network, Ipv6Network};
+pub use ipnetwork::{IpNetwork, IpNetworkError, Ipv4Network, Ipv6Network};
 use rangemap::{RangeInclusiveSet, StepFns, StepLite};
 use thiserror::Error;
 
@@ -179,6 +179,32 @@ fn findspare() -> Result<()> {
     ]);
     let (mut v4, v6, host, h6) = from_ipnet(&set, 31, 127);
     let dom = Ipv4A::new("100.64.0.0".parse()?, host)..=Ipv4A::new("100.64.255.255".parse()?, h6);
+    dbg!(v4.alloc(&dom));
+    Ok(())
+}
+
+#[test]
+fn findip() -> Result<()> {
+    let set: HashSet<IpNetwork> = HashSet::from_iter([
+        "100.64.0.2/24".parse()?, // Entire subnet considered occupied
+        "100.67.0.3/24".parse()?,
+        "100.68.0.3/24".parse()?,
+    ]);
+    let (mut v4, v6, host, h6) = from_ipnet(&set, 32, 128);
+    let dom = Ipv4A::new("100.64.0.0".parse()?, host)..=Ipv4A::new("100.64.255.255".parse()?, h6);
+    dbg!(v4.alloc(&dom)); // 100.64.1.0
+    Ok(())
+}
+
+#[test]
+fn findip2() -> Result<()> {
+    let mut v4: IDAlloc<Ipv4A> = Default::default();
+    v4.set(Ipv4A {
+        addr: "100.64.0.0".parse()?,
+        host: 0,
+    });
+    let dom = "100.64.0.0/16".parse::<Ipv4Network>()?.range(0);
+    dbg!(v4.alloc(&dom));
     dbg!(v4.alloc(&dom));
     Ok(())
 }

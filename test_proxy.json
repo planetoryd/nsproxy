@@ -1,5 +1,11 @@
 {
-    "url": "socks5://127.0.0.1:9909",
+    "proxy": {
+      "proxy_type": "Socks5",
+      "addr": "127.0.0.0:9909",
+      "credentials": null
+    },
+    "ipv6_enabled": true,
     "dns": "Handled",
-    "tap": false
-}
+    "dns_addr": "127.0.0.1",
+    "bypass": []
+  }

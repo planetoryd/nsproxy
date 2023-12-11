@@ -29,6 +29,13 @@ fn tun() -> Result<()> {
 impl PassFD<TUNC> {
     pub fn pass(&self) -> Result<()> {
         let mut conf: Configuration = Default::default();
+
+        #[cfg(target_os = "linux")]
+        conf.platform(|config| {
+            config.packet_information(true);
+            config.apply_settings(false);
+        });
+
         conf.layer(self.creation.layer);
         if let Some(na) = &self.creation.name {
             conf.name(na);

@@ -98,7 +98,7 @@ impl ProcNS {
         }
     }
     /// Pin down namespaces of a process.
-    /// If [really] is false, the bind mount is not performed. 
+    /// If [really] is false, the bind mount is not performed.
     fn mount(pid: PidPath, paths: &PathState, id: NodeI, really: bool) -> Result<Self> {
         let mut nsg: NSGroup<ExactNS<PathBuf>> = NSGroup::default();
         let binds = paths.mount(id)?;

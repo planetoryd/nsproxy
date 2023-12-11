@@ -14,7 +14,6 @@ pub mod paths;
 pub mod probe;
 pub mod sys;
 pub mod systemd;
-pub mod tun2proxy;
 
 use std::{borrow::Cow, path::Path};
 

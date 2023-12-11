@@ -1,6 +1,3 @@
-[submodule "tun2proxy"]
-	path = tun2proxy
-	url = https://github.com/blechschmidt/tun2proxy/
 [submodule "rust-tun"]
 	path = rust-tun
 	url = https://github.com/meh/rust-tun
@@ -22,3 +19,9 @@
 [submodule "netlink-proto"]
 	path = netlink-proto
 	url = https://github.com/planetoryd/netlink-proto
+[submodule "tun2socks5"]
+	path = tun2socks5
+	url = https://github.com/planetoryd/tun2socks5
+[submodule "socks5-impl"]
+	path = socks5-impl
+	url = https://github.com/planetoryd/socks5-impl

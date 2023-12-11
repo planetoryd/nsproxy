@@ -33,7 +33,8 @@ use nsproxy::{data::Ix, systemd};
 use nsproxy_common::{ExactNS, PidPath, Validate, ValidateScoped};
 use passfd::FdPassingExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use tun::Layer;
+use tokio::sync::mpsc;
+use tun::{AsyncDevice, Configuration, Layer};
 
 #[derive(Parser)]
 #[command(
@@ -108,9 +109,7 @@ fn main() -> Result<()> {
     let paths: Paths = PathState::default()?.into();
     let mut graphs = Graphs::load_file(&paths)?;
     // We must use a one thread runtime to not mess up NS.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+
     match cli.command {
         Commands::SOCKS2TUN {
             pid,
@@ -118,6 +117,9 @@ fn main() -> Result<()> {
             cmd,
             uid,
         } => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
             let capsys = check_capsys();
             tun2proxy = tun2proxy.canonicalize()?;
             // Connect and authenticate to systemd before entering userns
@@ -262,9 +264,17 @@ fn main() -> Result<()> {
             let (conn, _addr) = fdx.accept()?;
             let devfd: RawFd = conn.recv_fd()?;
             log::info!("Got FD");
-            let args = tun2proxy::load_conf(conf)?;
+            let mut cf = File::open(&conf)?;
+            let args: tun2socks5::IArgs = serde_json::from_reader(&mut cf)?;
             log::info!("{:?}", args);
-            tun2proxy::tuntap(args, devfd)?;
+            let devconf = Configuration::default();
+            let dev = tun::platform::linux::Device::from_raw_fd(devfd, &devconf)?;
+            let dev = AsyncDevice::new(dev)?;
+            let (sx, rx) = mpsc::channel(1);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(tun2socks5::main_entry(dev, 1500, true, args, rx))?;
         }
         Commands::Watch {} => {}
         Commands::Init { undo } => {
