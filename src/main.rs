@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::process::{exit, Command, Stdio};
 use std::{fs::File, io::Read, os::fd::AsFd, path::PathBuf};
 
@@ -12,7 +13,7 @@ use capctl::prctl;
 use clap::{Parser, Subcommand};
 use daggy::petgraph::data::Build;
 use ipnetwork::IpNetwork;
-use libc::SIGTERM;
+use libc::{uid_t, SIGTERM};
 use log::LevelFilter::{self, Debug};
 use netlink_ops::netlink::{nl_ctx, NLDriver, NLHandle, VethConn};
 use netlink_ops::rtnetlink::netlink_proto::{new_connection_from_socket, NetlinkCodec};
@@ -29,7 +30,7 @@ use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::{check_capsys, your_shell, UserNS};
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
-use nsproxy_common::{ExactNS, PidPath};
+use nsproxy_common::{ExactNS, PidPath, Validate, ValidateScoped};
 use passfd::FdPassingExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use tun::Layer;
@@ -57,6 +58,8 @@ enum Commands {
         tun2proxy: PathBuf,
         /// Command to run
         cmd: Option<String>,
+        #[arg(long, short)]
+        uid: Option<uid_t>,
     },
     /// Start as watcher daemon
     Watch {},
@@ -94,12 +97,6 @@ enum Commands {
         /// Command to run
         cmd: Option<String>,
     },
-    Veth {
-        #[arg(long, short)]
-        uid: Option<u32>,
-        /// Command to run
-        cmd: Option<String>,
-    },
 }
 
 fn main() -> Result<()> {
@@ -119,12 +116,14 @@ fn main() -> Result<()> {
             pid,
             mut tun2proxy,
             cmd,
+            uid,
         } => {
             let capsys = check_capsys();
             tun2proxy = tun2proxy.canonicalize()?;
             // Connect and authenticate to systemd before entering userns
             let pre = rt.block_on(async { zbus::Connection::session().await })?;
             let mut uns = None;
+            graphs.prune(true, true)?;
             match capsys {
                 Ok(_) => {
                     // The user is using SUID or sudo, or we are alredy in a userns, or user did setcap.
@@ -138,12 +137,12 @@ fn main() -> Result<()> {
                     check_capsys()?;
                 }
             }
-            // graphs.prune()?;
+            graphs.prune(false, false)?;
             let (mut sp, mut sc) = UnixStream::pair()?;
             let mut buf = [0; 1];
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
             let src = if let Some(pid) = pid {
-                graphs.add_object(PidPath::N(pid), &paths, uns.as_ref())?
+                graphs.add_object(PidPath::N(pid), &paths, uns.as_ref(), true)?
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
@@ -154,6 +153,11 @@ fn main() -> Result<()> {
                         let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!(
                             "--cgomd must be specified when --pid is not provided"
                         ))?);
+                        // We don't change uid of this process.
+                        // Otherwise probe might fail due to perms
+                        if let Some(u) = uid {
+                            cmd.uid(u);
+                        }
                         // NOTE: when parent process crashed, the child process fish shell got broken stdout and stderr
                         // It probably dead looped on it and ate up the CPU.
                         // TODO: crash test, and make sure child process doesnt get broken pipe.
@@ -167,16 +171,24 @@ fn main() -> Result<()> {
                     }
                     ForkResult::Parent { child } => {
                         sp.read_exact(&mut buf)?;
-                        let k =
-                            graphs.add_object(PidPath::N(child.as_raw()), &paths, uns.as_ref())?;
+                        let k = graphs.add_object(
+                            PidPath::N(child.as_raw()),
+                            &paths,
+                            uns.as_ref(),
+                            true,
+                        )?;
                         sp.write_all(&[1])?;
                         k
                     }
                 }
             }; // Source of TUNFD/SocketFD
-            let out = graphs.add_object(PidPath::Selfproc, &paths, uns.as_ref())?;
+            let out = graphs.add_object(PidPath::Selfproc, &paths, uns.as_ref(), true)?;
             // dbg!(&graphs.data.node_indices().collect::<Vec<_>>());
             let edge = graphs.data.add_edge(src, out, None);
+            log::info!(
+                "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
+                graphs.data[src].as_ref().unwrap().main.key()
+            );
             rt.block_on(async move {
                 let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
                 let serv = systemd::Systemd::new(&paths, pre).await?;
@@ -199,8 +211,16 @@ fn main() -> Result<()> {
         Commands::Probe { id } => {
             // Load graphs, send FDs over socket
             let (node, deps) = graphs.nodewdeps(NodeI::from(id))?;
-            node.item.validate()?;
+            log::info!("{:?}", &node.item.main);
+            match &node.item.main {
+                ProcNS::ByPath(p) => p.validate_out()?,
+                ProcNS::PidFd(p) => p.validate()?,
+            }
             node.item.main.enter()?;
+            match &node.item.main {
+                ProcNS::ByPath(p) => p.validate_in()?,
+                ProcNS::PidFd(p) => (),
+            }
             for edge in deps {
                 match edge.item {
                     Relation::SendSocket(p) => p.pass()?,
@@ -297,7 +317,7 @@ fn main() -> Result<()> {
                 .as_ref() // Second one is an invariant
                 .unwrap();
             node.main.enter()?;
-            let mut cmd = Command::new(your_shell(None)?.ok_or(anyhow!("specify env var SHELL"))?);
+            let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
             cmd.spawn()?.wait()?;
         }
         Commands::Info => {
@@ -307,92 +327,6 @@ fn main() -> Result<()> {
                 paths.userns().paths(),
                 paths.userns().exist()?
             );
-        }
-        Commands::Veth { mut uid, cmd } => {
-            // sysctl net.ipv4.ip_forward=1
-            check_capsys()?;
-            let mut k = [0; 1];
-            let (mut sp, mut sc) = UnixStream::pair()?;
-            match unsafe { fork() }? {
-                ForkResult::Child => {
-                    unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
-                    sethostname("proxied")?;
-                    let nl = Socket::new(NETLINK_ROUTE)?;
-                    nl.set_non_blocking(true)?;
-                    sc.send_fd(nl.as_raw_fd())?;
-                    if uid.is_none() {
-                        let sudoid = std::env::var("SUDO_UID");
-                        if let Ok(id) = sudoid {
-                            uid = Some(id.parse()?);
-                        } else {
-                            uid = Some(1000)
-                        }
-                    }
-                    let u = Uid::from_raw(uid.unwrap());
-                    setresuid(u, u, u)?;
-                    // sp.write_all(&[0])?;
-                    // sp.read_exact(&mut k)?;
-                    prctl::set_pdeathsig(Some(SIGTERM))?;
-                    let mut cmd =
-                        Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
-                    cmd.spawn()?.wait()?;
-                }
-                ForkResult::Parent { child } => {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?;
-                    rt.block_on(async {
-                        let fd = sp.recv_fd()?;
-                        let (conn, h, _) =
-                            new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
-                                TokioSocket::from_raw_fd(fd)
-                            });
-                        rt.spawn(conn);
-                        let h = NLHandle::new(
-                            Handle::new(h),
-                            ExactNS::from_pid(nsproxy_common::PidPath::N(child.as_raw()), "net")?,
-                        );
-                        let mut nl_ch = NLDriver::new(h);
-                        let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-                        nl_ch.fill().await?;
-                        nl.fill().await?;
-                        let mut addrset: HashSet<IpNetwork> = HashSet::default(); // find unused subnet
-                        {
-                            nl_ctx!(link, conn, nl_ch);
-                            conn.set_up(link.map.get_mut(&"lo".parse()?).unwrap().exist_mut()?)
-                                .await?;
-                            for (k, ex) in link.map {
-                                if let Existence::Exist(li) = ex {
-                                    match &li.addrs {
-                                        ExpCollection::Filled(addr) => {
-                                            addrset.extend(addr.keys().into_iter());
-                                        }
-                                        _ => (),
-                                    }
-                                }
-                            }
-                        }
-
-                        let vc = VethConn {
-                            subnet_veth: "100.67.0.0/24".parse()?,
-                            subnet6_veth: "fe80:2e::/24".parse()?,
-                            ip_va: "100.67.0.1/24".parse()?,
-                            ip_vb: "100.67.0.2/24".parse()?,
-                            ip6_va: "fe80:2e::1/24".parse()?,
-                            ip6_vb: "fe80:2e::2/24".parse()?,
-                            key: "ve".parse()?,
-                        };
-                        vc.apply(&mut nl_ch, &mut nl).await?;
-                        let mut nl_ch = NLDriver::new(nl_ch.conn);
-                        let mut nl = NLDriver::new(nl.conn);
-                        nl_ch.fill().await?;
-                        nl.fill().await?;
-                        vc.apply_addr_up(&mut nl_ch, &mut nl).await?;
-                        aok!()
-                    })?;
-                    waitpid(Some(Pid::from_raw(-1)), None)?;
-                }
-            }
         }
     }
     Ok(())

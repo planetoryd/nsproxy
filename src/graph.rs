@@ -20,21 +20,37 @@ use daggy::{
     stable_dag::StableDag,
     Dag,
 };
-use nsproxy_common::Validate;
 use nsproxy_common::ValidationErr;
+use nsproxy_common::{Validate, ValidateScoped};
 use petgraph::visit::IntoNodeReferences;
 use serde_json::{from_str, to_string_pretty};
 
 impl Graphs {
-    pub fn prune(&mut self) -> Result<()> {
+    pub fn prune(&mut self, outside: bool, pid: bool) -> Result<()> {
         let mut remove = Vec::new();
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
-                let rx = k.validate();
+                let rx = match &k.main {
+                    ProcNS::ByPath(p) => {
+                        if outside {
+                            p.validate_out()
+                        } else {
+                            p.validate_in()
+                        }
+                    }
+                    ProcNS::PidFd(p) => {
+                        if pid {
+                            p.validate()
+                        } else {
+                            Ok(())
+                        }
+                    }
+                };
                 if let Err(er) = rx {
                     let expected = er.downcast::<ValidationErr>()?;
-                    log::info!("Removing NS node {}", k.main.key());
+                    log::info!("Removing NS node {} for {}", k.main.key(), expected);
                     self.map.remove(&k.main.key());
+                    remove.push(ni);
                 }
             } else {
                 remove.push(ni);
@@ -69,14 +85,5 @@ impl Graphs {
     }
     pub fn path(path: &PathState) -> PathBuf {
         path.state.join("graphs.json")
-    }
-}
-
-#[public]
-impl ObjectNode {
-    fn validate(&self) -> Result<()> {
-        self.main.validate()?;
-        // It should return Err in that case. A bool lacks info.
-        Ok(())
     }
 }

@@ -90,15 +90,32 @@ pub type EdgeI = EdgeIndex<Ix>;
 
 /// Group of NSes; usually belongs to a process.
 #[public]
-#[derive(Derivative, Serialize, Deserialize, Validate, Debug)]
+#[derive(Derivative, Serialize, Deserialize, Debug)]
 #[derivative(Default(bound = ""))]
-#[va(impl<N: Validate> Validate for NSGroup<N>)]
 struct NSGroup<N: Validate> {
     mnt: NSSlot<N, NSMnt>,
     uts: NSSlot<N, NSUts>,
     net: NSSlot<N, NSNet>,
     user: NSSlot<N, NSUser>,
     pid: NSSlot<N, NSPid>,
+}
+
+#[public]
+impl<N: Validate> ValidateScoped for NSGroup<N> {
+    /// Validation outside userns
+    fn validate_out(&self) -> Result<()> {
+        self.mnt.validate()
+    }
+    fn validate_in(&self) -> Result<()> {
+        validate!(self, [user, net, pid, uts]);
+        Ok(())
+    }
+}
+
+pub macro validate($var:ident, [$($fi:ident),*]) {
+    $(
+        $var.$fi.validate()?;
+    )*
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -216,6 +233,7 @@ impl Graphs {
         pid: PidPath,
         paths: &PathState,
         usermnt: Option<&ProcNS>,
+        really: bool,
     ) -> Result<NodeI> {
         let ns = ProcNS::key_ident(pid)?;
         let uf = ns.unique;
@@ -229,7 +247,7 @@ impl Graphs {
                 let ix: NodeI = self.data.add_node(None);
                 // Always try unmount
                 ProcNS::umount(ix, paths)?;
-                let mut node = ProcNS::mount(pid, paths, ix)?;
+                let mut node = ProcNS::mount(pid, paths, ix, really)?;
                 if let Some(p) = usermnt {
                     node.merge(p);
                 }

@@ -43,22 +43,24 @@ use nix::{
 
 #[public]
 impl<K: NSTrait> NSSlot<ExactNS<PathBuf>, K> {
-    fn mount(mut pid: PidPath, binds: &Binds) -> Result<Self> {
+    fn mount(mut pid: PidPath, binds: &Binds, really: bool) -> Result<Self> {
         let name = K::NAME;
         pid = pid.to_n();
         let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", name]
             .iter()
             .collect();
         let stat = nix::sys::stat::stat(&path)?;
-        let bindat = binds.ns(name);
-        let _ = File::create(&bindat)?;
-        mount(
-            Some(&path),
-            &bindat,
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None::<&str>,
-        )?;
+        if really {
+            let bindat = binds.ns(name);
+            let _ = File::create(&bindat)?;
+            mount(
+                Some(&path),
+                &bindat,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            )?;
+        }
 
         Ok(NSSlot::Provided(
             ExactNS {
@@ -70,9 +72,9 @@ impl<K: NSTrait> NSSlot<ExactNS<PathBuf>, K> {
     }
 }
 
-pub macro mount_by_pid( $pid:expr,$binds:expr,$group:ident,[$($name:ident),*] ) {
+pub macro mount_by_pid( $pid:expr,$binds:expr,$group:ident,$v:expr,[$($name:ident),*] ) {
     $(
-        $group.$name = NSSlot::mount($pid, $binds)?;
+        $group.$name = NSSlot::mount($pid, $binds, $v)?;
     )*
 }
 
@@ -96,10 +98,11 @@ impl ProcNS {
         }
     }
     /// Pin down namespaces of a process.
-    fn mount(pid: PidPath, paths: &PathState, id: NodeI) -> Result<Self> {
+    /// If [really] is false, the bind mount is not performed. 
+    fn mount(pid: PidPath, paths: &PathState, id: NodeI, really: bool) -> Result<Self> {
         let mut nsg: NSGroup<ExactNS<PathBuf>> = NSGroup::default();
         let binds = paths.mount(id)?;
-        mount_by_pid!(pid, &binds, nsg, [net, uts, pid]);
+        mount_by_pid!(pid, &binds, nsg, really, [net, uts, pid]);
 
         Ok(Self::ByPath(nsg))
     }
@@ -198,7 +201,7 @@ fn mount_self() -> Result<()> {
     let path = PathState::default()?;
     let path: Paths = path.into();
     dbg!(path.clone());
-    let mounted = ProcNS::mount(PidPath::Selfproc, &path, 3.into())?;
+    let mounted = ProcNS::mount(PidPath::Selfproc, &path, 3.into(), true)?;
     dbg!(mounted);
 
     Ok(())
@@ -220,15 +223,6 @@ impl NSEnter for ExactNS<PathBuf> {
 
 pub trait NSEnter {
     fn enter(&self, f: CloneFlags) -> Result<()>;
-}
-
-impl Validate for ProcNS {
-    fn validate(&self) -> Result<()> {
-        match &self {
-            Self::ByPath(p) => p.validate(),
-            Self::PidFd(p) => p.validate(),
-        }
-    }
 }
 
 pub struct UserNS<'p>(pub &'p PathState);

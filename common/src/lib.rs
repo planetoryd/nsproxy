@@ -17,6 +17,11 @@ pub trait Validate {
     fn validate(&self) -> Result<()>;
 }
 
+pub trait ValidateScoped {
+    fn validate_out(&self) -> Result<()>;
+    fn validate_in(&self) -> Result<()>;
+}
+
 /// Represents an NS anchored to a process, or a file
 /// Equality iff .unique equals
 #[public]
