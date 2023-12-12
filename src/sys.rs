@@ -469,3 +469,11 @@ pub fn your_shell(specify: Option<String>) -> Result<Option<String>> {
         }
     })
 }
+
+pub fn enable_ping() -> Result<()> {
+    let mut f = File::options()
+        .write(true)
+        .open("/proc/sys/net/ipv4/ping_group_range")?;
+    f.write_all(b"0 2147483647")?;
+    Ok(())
+}

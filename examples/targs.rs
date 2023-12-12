@@ -5,8 +5,8 @@ use anyhow::Result;
 
 
 fn main() -> Result<()> {
-    let mut ia = IArgs {
-        proxy: ArgProxy::from_url("socks5://127.0.0.0:9909")?,
+    let ia = IArgs {
+        proxy: ArgProxy::from_url("socks5://127.0.0.1:9909")?,
         ipv6_enabled: true,
         dns: ArgDns::Handled,
         dns_addr: "127.0.0.1".parse()?,

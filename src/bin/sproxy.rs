@@ -28,7 +28,7 @@ use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
 use nsproxy::paths::{PathState, Paths};
-use nsproxy::sys::{check_capsys, your_shell, UserNS};
+use nsproxy::sys::{check_capsys, your_shell, UserNS, enable_ping};
 use nsproxy::*;
 use nsproxy_common::{ExactNS, PidPath};
 use passfd::FdPassingExt;
@@ -78,10 +78,7 @@ fn main() -> Result<()> {
                 ForkResult::Child => {
                     unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                     sethostname("proxied")?;
-                    let mut f = File::options()
-                        .write(true)
-                        .open("/proc/sys/net/ipv4/ping_group_range")?;
-                    f.write_all(b"0 2147483647")?;
+                    enable_ping()?;
                     let nl = Socket::new(NETLINK_ROUTE)?;
                     nl.set_non_blocking(true)?;
                     sc.send_fd(nl.as_raw_fd())?;

@@ -15,7 +15,6 @@ use systemd_zbus::{ManagerProxy, Mode::Replace};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    zbus::Proxy::call_with_flags(&self, method_name, flags, body)
     let conn = zbus::Connection::system().await?;
     let mg = ManagerProxy::new(&conn).await?;
     dbg!(mg.start_unit("probe5.service", Replace).await?);

@@ -27,7 +27,7 @@ use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid
 use nsproxy::data::{Graphs, NodeI, ObjectNode, PassFD, ProcNS, Relation, TUNC};
 use nsproxy::managed::{Indexed, ItemAction, ItemCreate, NodeWDeps, ServiceM, Socks2TUN, SrcNode};
 use nsproxy::paths::{PathState, Paths};
-use nsproxy::sys::{check_capsys, your_shell, UserNS};
+use nsproxy::sys::{check_capsys, your_shell, UserNS, enable_ping};
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
 use nsproxy_common::{ExactNS, PidPath, Validate, ValidateScoped};
@@ -118,8 +118,8 @@ fn main() -> Result<()> {
             uid,
         } => {
             let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
+                .enable_all()
+                .build()?;
             let capsys = check_capsys();
             tun2proxy = tun2proxy.canonicalize()?;
             // Connect and authenticate to systemd before entering userns
@@ -151,6 +151,7 @@ fn main() -> Result<()> {
                         unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                         sc.write_all(&[0])?;
                         sethostname("proxied")?;
+                        enable_ping()?;
                         sc.read_exact(&mut buf)?;
                         let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!(
                             "--cgomd must be specified when --pid is not provided"
@@ -268,13 +269,17 @@ fn main() -> Result<()> {
             let args: tun2socks5::IArgs = serde_json::from_reader(&mut cf)?;
             log::info!("{:?}", args);
             let devconf = Configuration::default();
-            let dev = tun::platform::linux::Device::from_raw_fd(devfd, &devconf)?;
-            let dev = AsyncDevice::new(dev)?;
-            let (sx, rx) = mpsc::channel(1);
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(tun2socks5::main_entry(dev, 1500, true, args, rx))?;
+            rt.block_on(async {
+                let dev = tun::platform::linux::Device::from_raw_fd(devfd, &devconf)?;
+                let dev = AsyncDevice::new(dev)?;
+                let (sx, rx) = mpsc::channel(1);
+                tun2socks5::main_entry(dev, 1500, true, args, rx).await?;
+
+                aok!()
+            })?;
         }
         Commands::Watch {} => {}
         Commands::Init { undo } => {
