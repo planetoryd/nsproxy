@@ -1,4 +1,6 @@
 # NSProxy
 
-A Kernel-namespaces-based alternative to proxychains.
+Kernel-namespaces-based alternative to proxychains.
+
+
 

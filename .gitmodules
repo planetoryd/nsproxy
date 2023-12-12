@@ -25,3 +25,9 @@
 [submodule "socks5-impl"]
 	path = socks5-impl
 	url = https://github.com/planetoryd/socks5-impl
+[submodule "pidfd"]
+	path = pidfd
+	url = https://github.com/planetoryd/pidfd
+[submodule "ipstack"]
+	path = ipstack
+	url = https://github.com/planetoryd/ipstack

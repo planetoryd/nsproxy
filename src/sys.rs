@@ -477,3 +477,22 @@ pub fn enable_ping() -> Result<()> {
     f.write_all(b"0 2147483647")?;
     Ok(())
 }
+
+pub fn cmd_uid(uid: Option<u32>) -> Result<()> {
+    let u = Uid::from_raw(find_uid(uid)?);
+    setresuid(u, u, u)?;
+    Ok(())
+}
+
+pub fn find_uid(uid: Option<u32>) -> Result<u32> {
+    if let Some(u) = uid {
+        Ok(u)
+    } else {
+        let sudoid = std::env::var("SUDO_UID");
+        if let Ok(id) = sudoid {
+            Ok(id.parse()?)
+        } else {
+            Ok(1000)
+        }
+    }
+}

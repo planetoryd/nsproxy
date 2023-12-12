@@ -10,6 +10,7 @@ workspace = { members = [
     "rustables",
     "id_alloc",
     "tun2socks5",
+    "ipstack"
 ] }
 
 [package]
@@ -44,7 +45,6 @@ nix = { version = "0.27.1", features = [
 ] }
 passfd = "0.1.6"
 rust-ini = "0.20.0"
-schematic = { version = "0.12.7", features = ["json"] }
 serde = { version = "1.0.190", features = ["derive"] }
 serde_json = "1.0.108"
 thiserror = "1.0.50"
@@ -54,7 +54,7 @@ nsproxy-common = { path = "./common" }
 zbus = { version = "3.14.1", features = ["tokio"] }
 systemd-zbus = "0.1.1"
 libsystemd = "0.7.0"
-pidfd = "0.2.4"
+pidfd = { path = "./pidfd" }
 tun = { path = "./rust-tun" }
 netlink-ops = { path = "./netlink-ops" }
 capctl = "0.2.3"
@@ -67,3 +67,6 @@ uzers = "0.11.3"
 proc-mounts = "0.3.0"
 id_alloc = { path = "./id_alloc" }
 tun2socks5 = { path = "./tun2socks5" }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+tracing-log = "0.2.0"

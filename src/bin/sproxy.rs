@@ -24,11 +24,11 @@ use netlink_ops::rtnetlink::netlink_sys::protocols::NETLINK_ROUTE;
 use netlink_ops::rtnetlink::netlink_sys::{AsyncSocket, Socket, TokioSocket};
 use netlink_ops::rtnetlink::Handle;
 use netlink_ops::state::{Existence, ExpCollection};
-use nix::sched::{unshare, CloneFlags};
+use nix::sched::{setns, unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
 use nsproxy::paths::{PathState, Paths};
-use nsproxy::sys::{check_capsys, your_shell, UserNS, enable_ping};
+use nsproxy::sys::{check_capsys, enable_ping, your_shell, UserNS, cmd_uid};
 use nsproxy::*;
 use nsproxy_common::{ExactNS, PidPath};
 use passfd::FdPassingExt;
@@ -56,6 +56,12 @@ enum Commands {
         /// Command to run
         cmd: Option<String>,
     },
+    Setns {
+        pid: u32,
+        cmd: Option<String>,
+        #[arg(long, short)]
+        uid: Option<u32>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -82,19 +88,11 @@ fn main() -> Result<()> {
                     let nl = Socket::new(NETLINK_ROUTE)?;
                     nl.set_non_blocking(true)?;
                     sc.send_fd(nl.as_raw_fd())?;
-                    if uid.is_none() {
-                        let sudoid = std::env::var("SUDO_UID");
-                        if let Ok(id) = sudoid {
-                            uid = Some(id.parse()?);
-                        } else {
-                            uid = Some(1000)
-                        }
-                    }
-                    let u = Uid::from_raw(uid.unwrap());
-                    setresuid(u, u, u)?;
+                    cmd_uid(uid)?;
                     // sp.write_all(&[0])?;
                     // sp.read_exact(&mut k)?;
                     prctl::set_pdeathsig(Some(SIGTERM))?;
+                    log::info!("In-netns process, {:?} (fork child)", getpid());
                     let mut cmd =
                         Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
                     cmd.spawn()?.wait()?;
@@ -166,6 +164,14 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Setns { pid, cmd, uid } => {
+            let f = unsafe { pidfd::PidFd::open(pid.try_into().unwrap(), 0) }?;
+            setns(f, CloneFlags::CLONE_NEWNET)?;
+            cmd_uid(uid)?;
+            let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
+            cmd.spawn()?.wait()?;
+        }
     }
     Ok(())
 }
+

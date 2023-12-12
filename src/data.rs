@@ -44,6 +44,16 @@ pub enum Relation {
 }
 
 #[public]
+impl Relation {
+    fn fd_recver(&self) -> &FDRecver {
+        match self {
+            Relation::SendSocket(p) => &p.receiver,
+            Relation::SendTUN(p) => &p.receiver,
+        }
+    }
+}
+
+#[public]
 #[derive(Serialize, Deserialize, Debug)]
 struct SocketC {
     addr: String,

@@ -24,16 +24,21 @@ use netlink_ops::state::{Existence, ExpCollection};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
-use nsproxy::data::{Graphs, NodeI, ObjectNode, PassFD, ProcNS, Relation, TUNC};
+use nsproxy::data::{FDRecver, Graphs, NodeI, ObjectNode, PassFD, ProcNS, Relation, TUNC};
 use nsproxy::managed::{Indexed, ItemAction, ItemCreate, NodeWDeps, ServiceM, Socks2TUN, SrcNode};
 use nsproxy::paths::{PathState, Paths};
-use nsproxy::sys::{check_capsys, your_shell, UserNS, enable_ping};
+use nsproxy::sys::{check_capsys, cmd_uid, enable_ping, your_shell, UserNS};
+use nsproxy::systemd::UnitName;
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
 use nsproxy_common::{ExactNS, PidPath, Validate, ValidateScoped};
 use passfd::FdPassingExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
+use tracing::instrument::WithSubscriber;
+use tracing::{info, warn, Level};
+use tracing_log::LogTracer;
+use tracing_subscriber::FmtSubscriber;
 use tun::{AsyncDevice, Configuration, Layer};
 
 #[derive(Parser)]
@@ -95,16 +100,33 @@ enum Commands {
     },
     Node {
         id: Ix,
-        /// Command to run
-        cmd: Option<String>,
+        #[command(subcommand)]
+        op: NodeOps,
     },
 }
 
+#[derive(Subcommand)]
+enum NodeOps {
+    Logs {
+        #[arg(long, short = 'n', default_value = "30")]
+        lines: u32,
+    },
+    Run {
+        /// Command to run
+        cmd: Option<String>,
+        #[arg(long, short)]
+        uid: Option<u32>,
+    },
+    Reboot,
+}
+
 fn main() -> Result<()> {
-    env_logger::builder()
-        .filter_level(LevelFilter::Debug)
-        .parse_default_env()
-        .init();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+    LogTracer::init()?;
+
     let cli = Cli::parse();
     let paths: Paths = PathState::default()?.into();
     let mut graphs = Graphs::load_file(&paths)?;
@@ -322,18 +344,59 @@ fn main() -> Result<()> {
                 log::error!("UserNS does not exist");
             }
         }
-        Commands::Node { id, cmd } => {
+        Commands::Node { id, op } => {
             let ix = NodeI::from(id);
-
-            let node = graphs
-                .data
-                .node_weight(ix)
-                .ok_or(anyhow!("Specified node does not exist"))?
-                .as_ref() // Second one is an invariant
-                .unwrap();
-            node.main.enter()?;
-            let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
-            cmd.spawn()?.wait()?;
+            // We gain full caps after setns
+            match op {
+                NodeOps::Run { cmd, uid } => {
+                    let node = graphs
+                        .data
+                        .node_weight(ix)
+                        .ok_or(anyhow!("Specified node does not exist"))?
+                        .as_ref() // Second one is an invariant
+                        .unwrap();
+                    node.main.enter()?;
+                    cmd_uid(uid)?;
+                    let mut cmd =
+                        Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
+                    cmd.spawn()?.wait()?;
+                }
+                NodeOps::Logs { lines } => {
+                    let mut cmd = Command::new("journalctl");
+                    let (node, deps) = graphs.nodewdeps(ix)?;
+                    let serv = match deps[0].item.fd_recver() {
+                        FDRecver::TUN2Proxy(path) => Socks2TUN::new(path, deps[0].id)?.service()?,
+                        FDRecver::Systemd(serv) => serv.to_owned(),
+                        _ => {
+                            warn!("No dependency known");
+                            return Ok(());
+                        }
+                    };
+                    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).args(
+                        format!("-n{lines} --follow -b --user-unit")
+                            .split(" ")
+                            .chain([serv.as_str()]),
+                    );
+                    let ch = cmd.spawn()?;
+                    let mut pager = Command::new("less");
+                    pager.stdin(Stdio::from(ch.stdout.unwrap()));
+                    pager.spawn()?.wait()?;
+                }
+                NodeOps::Reboot => {
+                    let (node, deps) = graphs.nodewdeps(ix)?;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    rt.block_on(async {
+                        let conn = zbus::Connection::session().await?;
+                        let serv = systemd::Systemd::new(&paths, conn).await?;
+                        let ctx = serv.ctx().await?;
+                        deps.restart(&serv, &ctx).await?;
+                        node.restart(&serv, &ctx).await?;
+                        aok!()
+                    })?;
+                }
+            }
         }
         Commands::Info => {
             log::info!("{:?}", &paths);

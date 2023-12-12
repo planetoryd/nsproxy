@@ -44,6 +44,7 @@ impl PassFD<TUNC> {
         dev.enabled(true)?;
         dev.set_nonblock()?;
         dev.persist()?;
+        assert!(dev.has_packet_information());
         self.connect_and_pass(&dev)?;
         Ok(())
     }
