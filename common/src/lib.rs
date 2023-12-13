@@ -1,53 +1,40 @@
 #![feature(associated_type_defaults)]
 
+use std::borrow::Borrow;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::HashMap;
 use std::error::Error;
+use std::hash::Hash;
 use std::io::ErrorKind;
-use std::path::Display;
+use std::path::{Display, Path};
 use std::{borrow::Cow, os::fd::AsRawFd, path::PathBuf};
 
 use anyhow::ensure;
 use anyhow::Result;
 use fully_pub::fully_pub as public;
+use indexmap::{Equivalent, IndexMap};
 use libc::stat;
 use nix::errno::Errno;
 use nix::{libc::pid_t, unistd::getpid};
 use serde::{de::Visitor, Deserialize, Serialize};
 
-pub trait Validate {
-    fn validate(&self) -> Result<()>;
+pub trait Validate<C: NCtx> {
+    fn validate(&self, cache: &mut VaCache, ctx: &C) -> Result<()>;
 }
 
-pub trait ValidateScoped {
-    fn validate_out(&self) -> Result<()>;
-    fn validate_in(&self) -> Result<()>;
+pub trait ValidateScoped<C: NCtx> {
+    fn validate_out(&self, cache: &mut VaCache, ctx: &C) -> Result<()>;
+    fn validate_in(&self, cache: &mut VaCache, ctx: &C) -> Result<()>;
 }
 
 /// Represents an NS anchored to a process, or a file
 /// Equality iff .unique equals
 #[public]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct ExactNS<S: Send + Sync> {
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct ExactNS {
     unique: UniqueFile,
-    source: S,
+    source: NSSource,
 }
-
-impl<S: Send + Sync, B: Send + Sync> ::std::cmp::PartialEq<ExactNS<B>> for ExactNS<S> {
-    fn eq(&self, other: &ExactNS<B>) -> bool {
-        true && match *self {
-            ExactNS {
-                unique: ref __self_0,
-                source: _,
-            } => match *other {
-                ExactNS {
-                    unique: ref __other_0,
-                    source: _,
-                } => true && &(*__self_0) == &(*__other_0),
-            },
-        }
-    }
-}
-
-impl<S: Send + Sync> ::std::cmp::Eq for ExactNS<S> {}
 
 /// We don't care about the means.
 /// We want to uniquely identify a file so we don't get into a wrong NS.
@@ -121,19 +108,6 @@ impl<'de> Visitor<'de> for UFVisitor {
     }
 }
 
-impl ExactNS<pid_t> {
-    /// Uses Pid FD
-    pub fn from(pid: pid_t) -> Result<Self> {
-        let f = unsafe { pidfd::PidFd::open(pid, 0) }?;
-        let fd = f.as_raw_fd();
-        let st = nix::sys::stat::fstat(fd)?;
-        Ok(ExactNS {
-            unique: st.into(),
-            source: pid,
-        })
-    }
-}
-
 /// Pid literal
 #[derive(Clone, Copy, Debug)]
 pub enum PidPath {
@@ -158,27 +132,38 @@ impl PidPath {
     }
 }
 
-#[public]
-impl ExactNS<PathBuf> {
-    fn from(path: PathBuf) -> Result<Self> {
+pub trait NSFrom<S>: Sized {
+    fn from_source(source: S) -> Result<Self>;
+}
+
+impl NSFrom<PathBuf> for ExactNS {
+    fn from_source(path: PathBuf) -> Result<Self> {
         let stat = nix::sys::stat::stat(&path)?;
         Ok(Self {
             unique: stat.into(),
-            source: path,
+            source: NSSource::Path(path),
         })
     }
-    pub fn from_pid(pid: PidPath, name: &str) -> Result<Self> {
-        let path = PathBuf::from(format!("/proc/{}/ns/{}", pid.to_str(), name));
-        let stat = nix::sys::stat::stat(&path)?;
+}
+
+impl NSFrom<(PidPath, &str)> for ExactNS {
+    fn from_source(source: (PidPath, &str)) -> Result<Self> {
+        let path = PathBuf::from(format!("/proc/{}/ns/{}", source.0.to_str(), source.1));
+        NSFrom::from_source(path)
+    }
+}
+
+impl NSFrom<pid_t> for ExactNS {
+    fn from_source(source: pid_t) -> Result<Self> {
         Ok(Self {
-            unique: stat.into(),
-            source: path,
+            unique: pidfd_uf(source)?.into(),
+            source: NSSource::Pid(source),
         })
     }
 }
 
 impl UniqueFile {
-    fn validate(&self, fst: stat) -> Result<(), ValidationErr> {
+    fn validate(&self, fst: &stat) -> Result<(), ValidationErr> {
         if fst.st_ino == self.ino && fst.st_dev == self.dev {
             Ok(())
         } else {
@@ -197,46 +182,141 @@ pub enum ValidationErr {
     ProcessGone,
 }
 
-impl Validate for ExactNS<pid_t> {
-    fn validate(&self) -> Result<()> {
-        match unsafe { pidfd::PidFd::open(self.source, 0) } {
-            Ok(f) => {
-                let fd = f.as_raw_fd();
-                let st = nix::sys::stat::fstat(fd)?;
+#[derive(Serialize, Debug, Deserialize, Clone, PartialEq, Eq)]
+pub enum NSSource {
+    Pid(pid_t),
+    Path(PathBuf),
+}
+
+impl<C: NCtx> Validate<C> for ExactNS {
+    /// Checking if the ino and dev of the specified file matches the recorded stat
+    fn validate(&self, cache: &mut VaCache, ctx: &C) -> Result<()> {
+        match &self.source {
+            NSSource::Path(p) => {
+                let st = cached_stat(cache, (p, ctx.mnt()))?;
                 self.unique.validate(st)?;
             }
-            Err(eno) => {
-                // WARN This should be "no such process", but who knows
-                if eno.raw_os_error() == Some(3) {
-                    return Err(ValidationErr::ProcessGone.into());
-                } else {
-                    return Err(eno.into());
-                }
+            NSSource::Pid(p) => {
+                let st = cached_fstat(cache, (*p, ctx.pid()))?;
+                self.unique.validate(st)?;
             }
         }
-
         Ok(())
     }
 }
 
-impl Validate for ExactNS<PathBuf> {
-    fn validate(&self) -> Result<()> {
-        match nix::sys::stat::stat(&self.source) {
-            Ok(st) => {
-                self.unique.validate(st)?;
-            }
-            Err(eno) => match eno {
-                Errno::ENOENT => {
-                    return Err(ValidationErr::FileNonExist.into());
-                }
-                _ => {
-                    return Err(eno.into());
-                }
-            },
-        }
+#[derive(Default)]
+#[public]
+struct VaCache {
+    pid: IndexMap<NSedPid, stat>,
+    mnt: IndexMap<NSedPath, stat>,
+}
 
-        Ok(())
+#[test]
+fn getbyref() {
+    let va = VaCache::default();
+    let uq = UniqueFile { ino: 0, dev: 0 };
+    va.pid.get(&(0, &uq));
+    let pa = PathBuf::new();
+    va.mnt.get(&(&pa, &uq));
+}
+
+pub trait NCtx {
+    fn mnt(&self) -> &UniqueFile;
+    fn pid(&self) -> &UniqueFile;
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct NSedPid(pid_t, UniqueFile);
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct NSedPath(PathBuf, UniqueFile);
+
+pub type NPid<'k> = (pid_t, &'k UniqueFile);
+impl Equivalent<NSedPid> for NPid<'_> {
+    fn equivalent(&self, key: &NSedPid) -> bool {
+        self.0 == key.0 && self.1 == &key.1
     }
+}
+
+impl<'a> From<&'a NPid<'a>> for NSedPid {
+    fn from(value: &'a NPid) -> Self {
+        Self(value.0.to_owned(), value.1.to_owned())
+    }
+}
+
+pub type NMnt<'k> = (&'k PathBuf, &'k UniqueFile); // Namespaced mount
+
+impl Equivalent<NSedPath> for NMnt<'_> {
+    fn equivalent(&self, key: &NSedPath) -> bool {
+        self.0 == &key.0 && self.1 == &key.1
+    }
+}
+
+impl<'a> From<&'a NMnt<'_>> for NSedPath {
+    fn from(value: &'a NMnt) -> Self {
+        Self(value.0.to_owned(), value.1.to_owned())
+    }
+}
+
+pub trait CachedMap {
+    type K;
+    type V;
+    fn cached_get<'e, E: Equivalent<Self::K> + Hash + PartialEq>(
+        &mut self,
+        key: &'e E,
+        init: impl FnOnce(&E) -> Result<Self::V>,
+    ) -> Result<&Self::V>
+    where
+        &'e E: Into<Self::K>;
+}
+
+impl<K: Hash + Eq, V> CachedMap for IndexMap<K, V> {
+    type K = K;
+    type V = V;
+    fn cached_get<'e, E: Equivalent<Self::K> + Hash + PartialEq>(
+        &mut self,
+        key: &'e E,
+        init: impl FnOnce(&E) -> Result<Self::V>,
+    ) -> Result<&Self::V>
+    where
+        &'e E: Into<Self::K>,
+    {
+        if !self.contains_key(key) {
+            self.insert(key.into(), init(key)?);
+        }
+        Ok(self.get(key).unwrap())
+    }
+}
+
+pub fn cached_fstat<'m>(ca: &'m mut VaCache, cp: NPid) -> Result<&'m stat> {
+    ca.pid.cached_get(&cp, |k| pidfd_uf(k.0))
+}
+
+/// Stat by a pid
+pub fn pidfd_uf(k: pid_t) -> Result<stat> {
+    match unsafe { pidfd::PidFd::open(k, 0) } {
+        Ok(f) => {
+            let fd = f.as_raw_fd();
+            let st = nix::sys::stat::fstat(fd)?;
+            Ok(st)
+        }
+        Err(eno) => {
+            // WARN This should be "no such process", but who knows
+            if eno.raw_os_error() == Some(3) {
+                return Err(ValidationErr::ProcessGone.into());
+            } else {
+                return Err(eno.into());
+            }
+        }
+    }
+}
+
+pub fn cached_stat<'k>(ca: &'k mut VaCache, path: NMnt) -> Result<&'k stat> {
+    ca.mnt.cached_get(&path, |k| {
+        let st = nix::sys::stat::stat::<Path>(k.0.as_path())?;
+        Ok(st)
+    })
 }
 
 #[test]

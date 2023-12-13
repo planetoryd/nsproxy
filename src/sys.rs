@@ -41,73 +41,46 @@ use nix::{
     NixPath,
 };
 
+fn mount_single(mut pid: PidPath, binds: &Binds, really: bool, name: &str) -> Result<ExactNS> {
+    // let name = K::NAME;
+    pid = pid.to_n();
+    let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", name]
+        .iter()
+        .collect();
+    let stat = nix::sys::stat::stat(&path)?;
+    let bindat = binds.ns(name);
+
+    if really {
+        let _ = File::create(&bindat)?;
+        mount(
+            Some(&path),
+            &bindat,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )?;
+    }
+
+    Ok(ExactNS {
+        source: NSSource::Path(bindat),
+        unique: stat.into(),
+    })
+}
+
 #[public]
-impl<K: NSTrait> NSSlot<ExactNS<PathBuf>, K> {
+impl<K: NSTrait> NSSlot<ExactNS, K> {
     fn mount(mut pid: PidPath, binds: &Binds, really: bool) -> Result<Self> {
         let name = K::NAME;
-        pid = pid.to_n();
-        let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", name]
-            .iter()
-            .collect();
-        let stat = nix::sys::stat::stat(&path)?;
-        if really {
-            let bindat = binds.ns(name);
-            let _ = File::create(&bindat)?;
-            mount(
-                Some(&path),
-                &bindat,
-                None::<&str>,
-                MsFlags::MS_BIND,
-                None::<&str>,
-            )?;
-        }
-
-        Ok(NSSlot::Provided(
-            ExactNS {
-                source: path,
-                unique: stat.into(),
-            },
-            default!(),
-        ))
+        let e = mount_single(pid, binds, really, name)?;
+        Ok(NSSlot::Provided(e, default!()))
     }
-}
-
-pub macro mount_by_pid( $pid:expr,$binds:expr,$group:ident,$v:expr,[$($name:ident),*] ) {
-    $(
-        $group.$name = NSSlot::mount($pid, $binds, $v)?;
-    )*
-}
-
-pub macro ns_call( $group:ident, $func:ident,[$($name:ident),*] ) {
-    $(
-        $group.$name.$func()?;
-    )*
 }
 
 #[public]
-impl ProcNS {
-    fn merge(&mut self, other: &Self) {
-        match self {
-            ProcNS::PidFd(p) => todo!(),
-            ProcNS::ByPath(p) => {
-                if let ProcNS::ByPath(o) = other {
-                    p.user = o.user.clone();
-                    p.mnt = o.mnt.clone();
-                }
-            }
-        }
-    }
-    /// Pin down namespaces of a process.
-    /// If [really] is false, the bind mount is not performed.
-    fn mount(pid: PidPath, paths: &PathState, id: NodeI, really: bool) -> Result<Self> {
-        let mut nsg: NSGroup<ExactNS<PathBuf>> = NSGroup::default();
-        let binds = paths.mount(id)?;
-        mount_by_pid!(pid, &binds, nsg, really, [net, uts, pid]);
-
-        Ok(Self::ByPath(nsg))
-    }
+impl NSGroup {
+    /// Returns the mounted procNSes from /proc/mountinfo
     /// Remember to enter userns (usually) or mounts wont be visible
-    fn mounted(paths: &PathState, id: NodeI) -> Result<HashMap<Ix, NSGroup<ExactNS<PathBuf>>>> {
+    fn mounted(paths: &PathState, id: NodeI) -> Result<HashMap<Ix, NSGroup>> {
         let mut map = HashMap::new();
         let binds = paths.mount(id)?.0;
         let it = proc_mounts::MountIter::new()?;
@@ -119,10 +92,13 @@ impl ProcNS {
                 let ns = path.file_name().unwrap().to_string_lossy();
                 let id = path.parent().unwrap().file_name().unwrap();
                 let id: Ix = id.to_string_lossy().parse()?;
-                let mut g = NSGroup::<_>::default();
                 let p = maps[ns.as_ref()];
-                p(&mut g, ExactNS::<PathBuf>::from(path)?);
-                map.insert(id, g);
+                if !map.contains_key(&id) {
+                    let g = NSGroup::default();
+                    map.insert(id, g);
+                }
+                let mut g = map.get_mut(&id).unwrap();
+                p(&mut g, ExactNS::from_source(path)?);
             }
         }
         Ok(map)
@@ -164,32 +140,8 @@ impl ProcNS {
         Ok(())
     }
     /// Identify the key as in the map
-    fn key_ident(pid: PidPath) -> Result<ExactNS<PathBuf>> {
-        ExactNS::<PathBuf>::from_pid(pid, "net")
-    }
-    // fn enter(&self, _f: CloneFlags) -> Result<()> {
-    fn enter(&self) -> Result<()> {
-        match &self {
-            ProcNS::ByPath(ng) => {
-                // Order matters
-                ns_call!(ng, enter_if, [user, mnt, net]);
-                // TODO: Because I am not sure what are the needs here
-                // 1. Rootful mode
-                // 2. Rootless mode
-                // 3. Handling of other NSes ?
-            }
-            _ => todo!(),
-        }
-        Ok(())
-    }
-    fn key(&self) -> UniqueFile {
-        match self {
-            ProcNS::ByPath(p) => match &p.net {
-                NSSlot::Provided(a, _) => a.unique,
-                _ => unreachable!(),
-            },
-            ProcNS::PidFd(p) => p.unique,
-        }
+    fn key_ident(pid: PidPath) -> Result<ExactNS> {
+        ExactNS::from_source((pid, "net"))
     }
 }
 
@@ -201,7 +153,7 @@ fn mount_self() -> Result<()> {
     let path = PathState::default()?;
     let path: Paths = path.into();
     dbg!(path.clone());
-    let mounted = ProcNS::mount(PidPath::Selfproc, &path, 3.into(), true)?;
+    let mounted = mount_ns_by_pid(PidPath::Selfproc, &path, 3.into(), true)?;
     dbg!(mounted);
 
     Ok(())
@@ -213,18 +165,31 @@ impl ObjectNode {
     pub fn this() {}
 }
 
-impl NSEnter for ExactNS<PathBuf> {
+impl NSEnter for NSSource {
     fn enter(&self, f: CloneFlags) -> Result<()> {
-        let fd = File::open(&self.source)?;
-        setns(fd, f)?;
+        match self {
+            Self::Path(p) => {
+                let fd = File::open(p)?;
+                setns(fd, f)?;
+            }
+            Self::Pid(p) => {
+                let fd = unsafe { pidfd::PidFd::open(*p, 0) }?;
+                setns(fd, f)?;
+            }
+        }
         Ok(())
+    }
+}
+
+impl NSEnter for ExactNS {
+    fn enter(&self, f: CloneFlags) -> Result<()> {
+        self.source.enter(f)
     }
 }
 
 pub trait NSEnter {
     fn enter(&self, f: CloneFlags) -> Result<()>;
 }
-
 pub struct UserNS<'p>(pub &'p PathState);
 
 #[test]
@@ -379,13 +344,13 @@ impl<'p> UserNS<'p> {
         (self.0.user(), self.0.private().join("mnt"))
     }
     /// Generate a [ProcNS]
-    fn procns(&self) -> Result<ProcNS> {
+    fn procns(&self) -> Result<NSGroup> {
         let (user, mnt) = self.paths();
-        Ok(ProcNS::ByPath(NSGroup {
-            user: NSSlot::Provided(ExactNS::<PathBuf>::from(user)?, default!()),
-            mnt: NSSlot::Provided(ExactNS::<PathBuf>::from(mnt)?, default!()),
+        Ok(NSGroup {
+            user: NSSlot::Provided(ExactNS::from_source(user)?, default!()),
+            mnt: NSSlot::Provided(ExactNS::from_source(mnt)?, default!()),
             ..Default::default()
-        }))
+        })
     }
 }
 

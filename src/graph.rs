@@ -8,7 +8,7 @@ use std::{io::Read, path::PathBuf};
 use super::*;
 use crate::{
     data::{
-        ExactNS, Graphs, Ix, NodeI, ObjectGraph, ObjectNS, ObjectNode, ProcNS, Relation, Route,
+        ExactNS, Graphs, Ix, NSGroup, NodeI, NSGraph, ObjectNode, Relation, Route,
         RouteNode,
     },
     paths::{PathState, Paths},
@@ -20,31 +20,21 @@ use daggy::{
     stable_dag::StableDag,
     Dag,
 };
-use nsproxy_common::ValidationErr;
+use nsproxy_common::{VaCache, ValidationErr, PidPath::Selfproc};
 use nsproxy_common::{Validate, ValidateScoped};
 use petgraph::visit::IntoNodeReferences;
 use serde_json::{from_str, to_string_pretty};
 
 impl Graphs {
-    pub fn prune(&mut self, outside: bool, pid: bool) -> Result<()> {
+    pub fn prune(&mut self, outside: bool, va: &mut VaCache) -> Result<()> {
+        let ctx = NSGroup::proc_path(Selfproc)?;
         let mut remove = Vec::new();
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
-                let rx = match &k.main {
-                    ProcNS::ByPath(p) => {
-                        if outside {
-                            p.validate_out()
-                        } else {
-                            p.validate_in()
-                        }
-                    }
-                    ProcNS::PidFd(p) => {
-                        if pid {
-                            p.validate()
-                        } else {
-                            Ok(())
-                        }
-                    }
+                let rx = if outside {
+                    k.main.validate_out(va, &ctx)
+                } else {
+                    k.main.validate_in(va, &ctx)
                 };
                 if let Err(er) = rx {
                     let expected = er.downcast::<ValidationErr>()?;

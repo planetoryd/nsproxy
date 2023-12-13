@@ -30,7 +30,7 @@ use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid
 use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::{check_capsys, enable_ping, your_shell, UserNS, cmd_uid};
 use nsproxy::*;
-use nsproxy_common::{ExactNS, PidPath};
+use nsproxy_common::{ExactNS, PidPath, NSFrom};
 use passfd::FdPassingExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -110,7 +110,7 @@ fn main() -> Result<()> {
                         rt.spawn(conn);
                         let h = NLHandle::new(
                             Handle::new(h),
-                            ExactNS::from_pid(nsproxy_common::PidPath::N(child.as_raw()), "net")?,
+                            ExactNS::from_source((nsproxy_common::PidPath::N(child.as_raw()), "net"))?,
                         );
                         let mut nl_ch = NLDriver::new(h);
                         let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);

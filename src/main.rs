@@ -24,14 +24,16 @@ use netlink_ops::state::{Existence, ExpCollection};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
-use nsproxy::data::{FDRecver, Graphs, NodeI, ObjectNode, PassFD, ProcNS, Relation, TUNC};
+use nsproxy::data::{
+    FDRecver, Graphs, NSGroup, NodeAddr, NodeI, ObjectNode, PassFD, Relation, TUNC,
+};
 use nsproxy::managed::{Indexed, ItemAction, ItemCreate, NodeWDeps, ServiceM, Socks2TUN, SrcNode};
 use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::{check_capsys, cmd_uid, enable_ping, your_shell, UserNS};
 use nsproxy::systemd::UnitName;
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
-use nsproxy_common::{ExactNS, PidPath, Validate, ValidateScoped};
+use nsproxy_common::{ExactNS, PidPath, VaCache, Validate, ValidateScoped};
 use passfd::FdPassingExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -66,6 +68,8 @@ enum Commands {
         cmd: Option<String>,
         #[arg(long, short)]
         uid: Option<uid_t>,
+        #[arg(long, short)]
+        name: Option<String>,
     },
     /// Start as watcher daemon
     Watch {},
@@ -95,14 +99,23 @@ enum Commands {
         /// You can not set to UIDs that have not been mapped in uid_map
         #[arg(long, short)]
         uid: Option<u32>,
-        #[arg(long, short)]
-        node: Option<Ix>,
+        #[arg(long, short, value_parser=parse_node)]
+        node: Option<NodeAddr>,
     },
     Node {
-        id: Ix,
+        #[arg(value_parser=parse_node)]
+        id: NodeAddr,
         #[command(subcommand)]
         op: NodeOps,
     },
+}
+
+fn parse_node(addr: &str) -> Result<NodeAddr> {
+    if let Ok(ix) = addr.parse::<Ix>() {
+        Ok(NodeAddr::Ix(ix.into()))
+    } else {
+        Ok(NodeAddr::Name(addr.into()))
+    }
 }
 
 #[derive(Subcommand)]
@@ -138,6 +151,7 @@ fn main() -> Result<()> {
             mut tun2proxy,
             cmd,
             uid,
+            name,
         } => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -147,7 +161,8 @@ fn main() -> Result<()> {
             // Connect and authenticate to systemd before entering userns
             let pre = rt.block_on(async { zbus::Connection::session().await })?;
             let mut uns = None;
-            graphs.prune(true, true)?;
+            let mut va = VaCache::default();
+            graphs.prune(true, &mut va)?;
             match capsys {
                 Ok(_) => {
                     // The user is using SUID or sudo, or we are alredy in a userns, or user did setcap.
@@ -161,12 +176,12 @@ fn main() -> Result<()> {
                     check_capsys()?;
                 }
             }
-            graphs.prune(false, false)?;
+            graphs.prune(false, &mut va)?;
             let (mut sp, mut sc) = UnixStream::pair()?;
             let mut buf = [0; 1];
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
             let src = if let Some(pid) = pid {
-                graphs.add_object(PidPath::N(pid), &paths, uns.as_ref(), true)?
+                graphs.add_ns(PidPath::N(pid), &paths, uns.as_ref(), true)?
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
@@ -196,7 +211,7 @@ fn main() -> Result<()> {
                     }
                     ForkResult::Parent { child } => {
                         sp.read_exact(&mut buf)?;
-                        let k = graphs.add_object(
+                        let k = graphs.add_ns(
                             PidPath::N(child.as_raw()),
                             &paths,
                             uns.as_ref(),
@@ -207,7 +222,10 @@ fn main() -> Result<()> {
                     }
                 }
             }; // Source of TUNFD/SocketFD
-            let out = graphs.add_object(PidPath::Selfproc, &paths, uns.as_ref(), true)?;
+            if let Some(na) = name {
+                graphs.name.insert(na, src);
+            }
+            let out = graphs.add_ns(PidPath::Selfproc, &paths, uns.as_ref(), true)?;
             // dbg!(&graphs.data.node_indices().collect::<Vec<_>>());
             let edge = graphs.data.add_edge(src, out, None);
             log::info!(
@@ -236,16 +254,13 @@ fn main() -> Result<()> {
         Commands::Probe { id } => {
             // Load graphs, send FDs over socket
             let (node, deps) = graphs.nodewdeps(NodeI::from(id))?;
+            let mut va = VaCache::default();
+            let ctx = NSGroup::proc_path(PidPath::Selfproc)?;
             log::info!("{:?}", &node.item.main);
-            match &node.item.main {
-                ProcNS::ByPath(p) => p.validate_out()?,
-                ProcNS::PidFd(p) => p.validate()?,
-            }
+            node.item.main.validate_out(&mut va, &ctx)?;
             node.item.main.enter()?;
-            match &node.item.main {
-                ProcNS::ByPath(p) => p.validate_in()?,
-                ProcNS::PidFd(p) => (),
-            }
+            let ctx = NSGroup::proc_path(PidPath::Selfproc)?;
+            node.item.main.validate_in(&mut va, &ctx)?;
             for edge in deps {
                 match edge.item {
                     Relation::SendSocket(p) => p.pass()?,
@@ -328,7 +343,7 @@ fn main() -> Result<()> {
             if usern.exist()? {
                 usern.procns()?.enter()?;
                 if rmall {
-                    ProcNS::rmall(&paths)?;
+                    NSGroup::rmall(&paths)?;
                 } else {
                     // This process gains full caps after setns, so we can do whatever.
                     if let Some(uid) = uid {
@@ -345,7 +360,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Node { id, op } => {
-            let ix = NodeI::from(id);
+            let ix = graphs.resolve(&id)?;
             // We gain full caps after setns
             match op {
                 NodeOps::Run { cmd, uid } => {
@@ -372,15 +387,18 @@ fn main() -> Result<()> {
                             return Ok(());
                         }
                     };
-                    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).args(
-                        format!("-n{lines} --follow -b --user-unit")
-                            .split(" ")
-                            .chain([serv.as_str()]),
-                    );
-                    let ch = cmd.spawn()?;
-                    let mut pager = Command::new("less");
-                    pager.stdin(Stdio::from(ch.stdout.unwrap()));
-                    pager.spawn()?.wait()?;
+                    cmd
+                        // .stdout(Stdio::piped()).stderr(Stdio::piped())
+                        .args(
+                            format!("-n{lines} --follow -b --user-unit")
+                                .split(" ")
+                                .chain([serv.as_str()]),
+                        );
+                    let mut ch = cmd.spawn()?;
+                    ch.wait()?;
+                    // let mut pager = Command::new("less");
+                    // pager.stdin(Stdio::from(ch.stdout.unwrap()));
+                    // pager.spawn()?.wait()?;
                 }
                 NodeOps::Reboot => {
                     let (node, deps) = graphs.nodewdeps(ix)?;

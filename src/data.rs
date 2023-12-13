@@ -3,6 +3,7 @@ use std::{
     collections::{hash_map, HashMap, HashSet},
     default,
     net::SocketAddr,
+    ops::AddAssign,
     path::PathBuf,
 };
 
@@ -10,11 +11,12 @@ use crate::{paths::PathState, sys::NSEnter};
 
 use super::*;
 use amplify::confinement::Collection;
+use anyhow::anyhow;
+use clap::ValueEnum;
 use derivative::Derivative;
 
 use netlink_ops::errors::ProgrammingError;
 use nix::sched::CloneFlags;
-use nsproxy_common::Validate;
 use nsproxy_derive::Validate;
 
 use daggy::{petgraph::stable_graph::StableDiGraph, Dag, EdgeIndex, NodeIndex};
@@ -26,7 +28,7 @@ pub use nsproxy_common::*;
 #[public]
 #[derive(Serialize, Deserialize, Debug)]
 struct ObjectNode {
-    main: ProcNS,
+    main: NSGroup,
 }
 
 #[public]
@@ -102,29 +104,102 @@ pub type EdgeI = EdgeIndex<Ix>;
 #[public]
 #[derive(Derivative, Serialize, Deserialize, Debug)]
 #[derivative(Default(bound = ""))]
-struct NSGroup<N: Validate> {
-    mnt: NSSlot<N, NSMnt>,
-    uts: NSSlot<N, NSUts>,
-    net: NSSlot<N, NSNet>,
-    user: NSSlot<N, NSUser>,
-    pid: NSSlot<N, NSPid>,
+struct NSGroup {
+    mnt: NSSlot<ExactNS, NSMnt>,
+    uts: NSSlot<ExactNS, NSUts>,
+    net: NSSlot<ExactNS, NSNet>,
+    user: NSSlot<ExactNS, NSUser>,
+    pid: NSSlot<ExactNS, NSPid>,
+}
+
+impl NCtx for NSGroup {
+    fn mnt(&self) -> &UniqueFile {
+        match &self.mnt {
+            NSSlot::Provided(p, _) => &p.unique,
+            _ => unreachable!()
+        }
+    }
+    fn pid(&self) -> &UniqueFile {
+        match &self.pid {
+            NSSlot::Provided(p, _) => &p.unique,
+            _ => unreachable!()
+        }
+    }
+}
+
+pub macro mount_by_pid( $pid:expr,$binds:expr,$group:ident,$v:expr,[$($name:ident),*] ) {
+    $(
+        $group.$name = NSSlot::mount($pid, $binds, $v)?;
+    )*
+}
+
+pub fn mount_ns_by_pid(
+    pid: PidPath,
+    paths: &PathState,
+    id: NodeI,
+    really: bool,
+) -> Result<NSGroup> {
+    let binds = paths.mount(id)?;
+    let mut nsg: NSGroup = NSGroup::default();
+    mount_by_pid!(pid, &binds, nsg, really, [net, uts, pid]);
+    Ok(nsg)
 }
 
 #[public]
-impl<N: Validate> ValidateScoped for NSGroup<N> {
-    /// Validation outside userns
-    fn validate_out(&self) -> Result<()> {
-        self.mnt.validate()
+impl NSGroup {
+    /// Pin down namespaces of a process.
+    /// If [really] is false, the bind mount is not performed, but the paths are returned
+    fn enter(&self) -> Result<()> {
+        ns_call!(self, [user, mnt, net], enter_if);
+        Ok(())
     }
-    fn validate_in(&self) -> Result<()> {
-        validate!(self, [user, net, pid, uts]);
+    fn proc_path(pid: PidPath) -> Result<Self> {
+        let mut g = Self::default();
+        assign!(g, [user, mnt, net], proc_path, pid);
+        Ok(g)
+    }
+    fn key(&self) -> UniqueFile {
+        match &self.net {
+            NSSlot::Provided(a, _) => a.unique,
+            _ => unreachable!(),
+        }
+    }
+}
+
+pub macro ns_call( $group:ident, [$($name:ident),*],  $func:ident) {
+    $(
+        $group.$name.$func()?;
+    )*
+}
+
+pub macro assign( $group:ident, [$($name:ident),*],  $func:ident, $arg:expr) {
+    $(
+        $group.$name = NSSlot::$func($arg)?;
+    )*
+}
+
+impl AddAssign<&NSGroup> for NSGroup {
+    /// Assigns with the user&mnt of rhs
+    fn add_assign(&mut self, rhs: &Self) {
+        self.user = rhs.user.clone();
+        self.mnt = rhs.mnt.clone();
+    }
+}
+
+impl<C: NCtx> ValidateScoped<C> for NSGroup {
+    /// Validation outside userns
+    fn validate_out(&self, cache: &mut VaCache, ctx: &C) -> Result<()> {
+        self.mnt.validate(cache, ctx)
+    }
+    fn validate_in(&self, cache: &mut VaCache, ctx: &C) -> Result<()> {
+        validate!(self, cache, ctx, [user, net, pid, uts]);
         Ok(())
     }
 }
 
-pub macro validate($var:ident, [$($fi:ident),*]) {
+pub macro validate($var:ident, $ca:expr, $ctx:expr, [$($fi:ident),*]) {
     $(
-        $var.$fi.validate()?;
+        $var.$fi.validate($ca, $ctx)?;
     )*
 }
 
@@ -136,7 +211,7 @@ pub enum NSSlot<N, K: NSTrait> {
 }
 
 #[public]
-impl<N: NSEnter, K: NSTrait> NSSlot<N, K> {
+impl<K: NSTrait> NSSlot<ExactNS, K> {
     fn enter(&self) -> Result<()> {
         match self {
             Self::Absent => Err(ProgrammingError)?,
@@ -152,6 +227,20 @@ impl<N: NSEnter, K: NSTrait> NSSlot<N, K> {
         }
         Ok(())
     }
+    fn proc_path(mut pid: PidPath) -> Result<Self> {
+        pid = pid.to_n();
+        let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", K::NAME]
+            .iter()
+            .collect();
+        let stat = nix::sys::stat::stat(&path)?;
+        Ok(NSSlot::Provided(
+            ExactNS {
+                source: NSSource::Path(path),
+                unique: stat.into(),
+            },
+            Default::default(),
+        ))
+    }
 }
 
 defNS!(NSUser, CLONE_NEWUSER, "user", user);
@@ -160,23 +249,23 @@ defNS!(NSNet, CLONE_NEWNET, "net", net);
 defNS!(NSUts, CLONE_NEWUTS, "uts", uts);
 defNS!(NSPid, CLONE_NEWPID, "pid", pid);
 
-pub fn nstypes<N: Validate>() -> HashMap<&'static str, fn(&mut NSGroup<N>, N)> {
+pub fn nstypes() -> HashMap<&'static str, fn(&mut NSGroup, ExactNS)> {
     let mut map = HashMap::new();
     map.insert(
         NSUser::NAME,
-        NSUser::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+        NSUser::set as for<'a> fn(&'a mut data::NSGroup, _),
     );
     map.insert(
         NSMnt::NAME,
-        NSMnt::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+        NSMnt::set as for<'a> fn(&'a mut data::NSGroup, _),
     );
     map.insert(
         NSNet::NAME,
-        NSNet::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+        NSNet::set as for<'a> fn(&'a mut data::NSGroup, _),
     );
     map.insert(
         NSUts::NAME,
-        NSUts::set::<N> as for<'a> fn(&'a mut data::NSGroup<_>, _),
+        NSUts::set as for<'a> fn(&'a mut data::NSGroup, _),
     );
     map
 }
@@ -187,65 +276,66 @@ pub macro defNS($name:ident, $flag:ident, $path:expr, $k:ident) {
     impl NSTrait for $name {
         const FLAG: CloneFlags = CloneFlags::$flag;
         const NAME: &'static str = $path;
-        fn set<N: Validate>(g: &mut NSGroup<N>, v: N) {
+        fn set(g: &mut NSGroup, v: ExactNS) {
             g.$k = NSSlot::Provided(v, Self);
         }
     }
 }
 
-impl<N: Validate, K: NSTrait> Validate for NSSlot<N, K> {
-    fn validate(&self) -> Result<()> {
+impl<C: NCtx, N: Validate<C>, K: NSTrait> Validate<C> for NSSlot<N, K> {
+    fn validate(&self, cache: &mut VaCache, ctx: &C) -> Result<()> {
         match self {
-            Self::Absent => Ok(()),
-            Self::Provided(k, _) => k.validate(),
+            Self::Absent => (),
+            Self::Provided(k, _) => k.validate(cache, ctx)?,
         }
+        Ok(())
     }
 }
 
 pub trait NSTrait: Default {
     const FLAG: CloneFlags;
     const NAME: &'static str;
-    fn set<N: Validate>(g: &mut NSGroup<N>, v: N);
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ProcNS {
-    /// Persistant NS.
-    /// You may also use /proc/pid/ here
-    ByPath(NSGroup<ExactNS<PathBuf>>),
-    PidFd(ExactNS<pid_t>),
+    fn set(g: &mut NSGroup, v: ExactNS);
 }
 
 pub type RouteDAG = Dag<RouteNode, Route, Ix>;
 // Allows parallel edges
 /// Data are used with [Option] because they are allocated and later filled.
-pub type ObjectGraph = StableDiGraph<Option<ObjectNode>, Option<Relation>, Ix>;
-/// Maps NETNS to object nodes
-/// Contract: If and only if a key pair exists, the object exists in the graph
-/// For simplicity, for one netns, only one object may exist, and other NSes are attached to it.
-pub type ObjectNS = HashMap<UniqueFile, NodeI>;
+pub type NSGraph = StableDiGraph<Option<ObjectNode>, Option<Relation>, Ix>;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[public]
 struct Graphs {
     route: RouteDAG,
-    data: ObjectGraph,
-    /// Maps objects to NetNS files
-    map: ObjectNS,
+    data: NSGraph,
+    /// Maps NETNS to object nodes
+    /// Contract: If and only if a key pair exists, the object exists in the graph
+    /// For simplicity, for one netns, only one object may exist, and other NSes are attached to it.
+    map: HashMap<UniqueFile, NodeI>,
+    name: HashMap<String, NodeI>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Ways to address a node
+pub enum NodeAddr {
+    Name(String),
+    Ix(NodeI),
+    /// Specifically Netns. All otber NSes are auxiliary
+    UF(UniqueFile),
 }
 
 #[public]
 impl Graphs {
     /// Attempt to add a new node
     /// Fork: do we enter the userns when mounting (by forking out)
-    fn add_object(
+    fn add_ns(
         &mut self,
         pid: PidPath,
         paths: &PathState,
-        usermnt: Option<&ProcNS>,
+        usermnt: Option<&NSGroup>,
         really: bool,
     ) -> Result<NodeI> {
-        let ns = ProcNS::key_ident(pid)?;
+        let ns = NSGroup::key_ident(pid)?;
         let uf = ns.unique;
         match self.map.entry(uf) {
             hash_map::Entry::Occupied(en) => {
@@ -256,14 +346,29 @@ impl Graphs {
                 log::info!("New NS object {pid:?}");
                 let ix: NodeI = self.data.add_node(None);
                 // Always try unmount
-                ProcNS::umount(ix, paths)?;
-                let mut node = ProcNS::mount(pid, paths, ix, really)?;
+                NSGroup::umount(ix, paths)?;
+                let mut node = mount_ns_by_pid(pid, paths, ix, really)?;
                 if let Some(p) = usermnt {
-                    node.merge(p);
+                    node += p;
                 }
                 self.data[ix].replace(ObjectNode { main: node });
                 Ok(*va.insert(ix))
             }
+        }
+    }
+    fn resolve(&self, addr: &NodeAddr) -> Result<NodeI> {
+        match addr {
+            NodeAddr::Ix(ix) => Ok(*ix),
+            NodeAddr::Name(name) => self
+                .name
+                .get(name)
+                .ok_or(anyhow!("specified name does not exist"))
+                .map(|k| *k),
+            NodeAddr::UF(uf) => self
+                .map
+                .get(uf)
+                .ok_or(anyhow!("specified UniqueFile has no associated node"))
+                .map(|k| *k),
         }
     }
 }
