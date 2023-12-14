@@ -150,7 +150,7 @@ impl NSGroup {
     /// Pin down namespaces of a process.
     /// If [really] is false, the bind mount is not performed, but the paths are returned
     fn enter(&self) -> Result<()> {
-        ns_call!(self, [user, mnt, net], enter_if);
+        ns_call!(self, [user, mnt, net, uts], enter_if);
         Ok(())
     }
     fn proc_path(pid: PidPath) -> Result<Self> {

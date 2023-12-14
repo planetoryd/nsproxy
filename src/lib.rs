@@ -35,3 +35,5 @@ pub fn path_to_str(pa: &Path) -> Result<&str> {
 pub macro aok() {
     Ok::<(), anyhow::Error>(())
 }
+
+pub const PROBE_TUN: &str = "tunp";

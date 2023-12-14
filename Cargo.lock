@@ -1557,14 +1557,12 @@ dependencies = [
 name = "ipstack"
 version = "0.0.2"
 dependencies = [
- "clap",
- "derivative",
  "etherparse",
  "thiserror",
  "tokio",
  "tracing",
- "tun 0.6.1 (git+https://github.com/ssrlive/rust-tun.git)",
- "udp-stream",
+ "tun 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "udp-stream 0.0.9",
  "wintun",
 ]
 
@@ -2004,6 +2002,7 @@ dependencies = [
  "tun 0.6.1",
  "tun2socks5",
  "uzers",
+ "vergen",
  "xdg",
  "zbus",
 ]
@@ -2035,6 +2034,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ntapi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8a3895c6391c39d7fe7ebc444a87eb2991b2a0bc718fdabd071eec617fc68e4"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2060,6 +2068,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
 dependencies = [
  "hermit-abi 0.3.3",
+ "libc",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2819ce041d2ee131036f4fc9d6ae7ae125a3a40e97ba64d04fe799ad9dabbb44"
+dependencies = [
  "libc",
 ]
 
@@ -2603,6 +2620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustversion"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
+
+[[package]]
 name = "ryu"
 version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2867,6 +2890,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.29.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd727fc423c2060f6c92d9534cef765c65a6ed3f428a03d7def74a8c4348e666"
+dependencies = [
+ "cfg-if",
+ "core-foundation-sys",
+ "libc",
+ "ntapi",
+ "once_cell",
+ "winapi",
+]
+
+[[package]]
 name = "systemd-zbus"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2942,6 +2979,8 @@ checksum = "c4a34ab300f2dee6e562c10a046fc05e358b29f9bf92277f30c3c8d82275f6f5"
 dependencies = [
  "deranged",
  "itoa",
+ "libc",
+ "num_threads",
  "powerfmt",
  "serde",
  "time-core",
@@ -3171,7 +3210,8 @@ dependencies = [
 [[package]]
 name = "tun"
 version = "0.6.1"
-source = "git+https://github.com/ssrlive/rust-tun.git#e944758112d23a2199b0c8d8adf8ffc6a8c1e9f5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0adb9992bbd5ca76f3847ed579ad4ee8defb2ec2eea918cceef17ccc66fa4fd4"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3189,6 +3229,7 @@ dependencies = [
 name = "tun2socks5"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-recursion",
  "async-trait",
  "base64",
@@ -3209,7 +3250,7 @@ dependencies = [
  "tokio",
  "trust-dns-proto",
  "tun 0.6.1",
- "udp-stream",
+ "udp-stream 0.0.10",
  "unicase",
  "url",
 ]
@@ -3219,6 +3260,16 @@ name = "typenum"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42ff0bf0c66b8238c6f3b578df37d0b7848e55df8577b3f74f92a69acceeb825"
+
+[[package]]
+name = "udp-stream"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8df3ef1fa3dfd82c5ada9eec0093cfbb1775a063eda2f38443d4fafd3081af19"
+dependencies = [
+ "bytes",
+ "tokio",
+]
 
 [[package]]
 name = "udp-stream"
@@ -3319,6 +3370,19 @@ name = "value-bag"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a72e1902dde2bd6441347de2b70b7f5d59bf157c6c62f0c44572607a1d55bbe"
+
+[[package]]
+name = "vergen"
+version = "8.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1290fd64cc4e7d3c9b07d7f333ce0ce0007253e32870e632624835cc80b83939"
+dependencies = [
+ "anyhow",
+ "rustc_version",
+ "rustversion",
+ "sysinfo",
+ "time",
+]
 
 [[package]]
 name = "version_check"

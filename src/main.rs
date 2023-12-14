@@ -135,10 +135,12 @@ enum NodeOps {
 
 fn main() -> Result<()> {
     let subscriber = FmtSubscriber::builder()
+        .compact()
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
     LogTracer::init()?;
+    info!("SHA1: {}", env!("VERGEN_GIT_SHA"));
 
     let cli = Cli::parse();
     let paths: Paths = PathState::default()?.into();
@@ -274,7 +276,7 @@ fn main() -> Result<()> {
                 let wh = NLDriver::new(NLHandle::new_self_proc_tokio()?);
                 // let mut nl = NLStateful::new(&wh);
                 // nl.fill().await?;
-                let li = wh.conn.get_link("tun0".parse()?).await?;
+                let li = wh.conn.get_link(crate::PROBE_TUN.parse()?).await?;
                 wh.conn
                     .ip_add_route(li.header.index, None, Some(true))
                     .await?;
@@ -390,7 +392,7 @@ fn main() -> Result<()> {
                     cmd
                         // .stdout(Stdio::piped()).stderr(Stdio::piped())
                         .args(
-                            format!("-n{lines} --follow -b --user-unit")
+                            format!("-n{lines} -o cat --follow -b --user-unit")
                                 .split(" ")
                                 .chain([serv.as_str()]),
                         );

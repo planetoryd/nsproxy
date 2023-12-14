@@ -10,14 +10,14 @@ workspace = { members = [
     "rustables",
     "id_alloc",
     "tun2socks5",
-    "ipstack"
+    "ipstack",
 ] }
 
 [package]
 name = "nsproxy"
 version = "0.1.0"
 edition = "2021"
-
+build = "build.rs"
 
 [profile.release]
 strip = true
@@ -70,3 +70,14 @@ tun2socks5 = { path = "./tun2socks5" }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 tracing-log = "0.2.0"
+
+[build-dependencies]
+# All features enabled
+vergen = { version = "8.0.0", features = [
+    "build",
+    "cargo",
+    "git",
+    "gitcl",
+    "rustc",
+    "si",
+] }
