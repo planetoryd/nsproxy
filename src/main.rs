@@ -308,7 +308,7 @@ fn main() -> Result<()> {
             let args: tun2socks5::IArgs = serde_json::from_reader(&mut cf)?;
             log::info!("{:?}", args);
             let devconf = Configuration::default();
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             rt.block_on(async {

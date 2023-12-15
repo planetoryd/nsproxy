@@ -35,7 +35,7 @@ impl<T: Ord + Clone + StepFns<T> + StepLite> IDAlloc<T> {
             None
         }
     }
-    pub fn dealloc(&mut self, id: T) {
+    pub fn unset(&mut self, id: T) {
         self.0.remove(id.clone()..=id);
     }
     pub fn alloc_or(&mut self, domain: &RangeInclusive<T>) -> Result<T, IDAllocError> {
@@ -61,10 +61,10 @@ fn allocs() {
     assert_eq!(ida.alloc(&dom), Some(0));
     assert_eq!(ida.alloc(&dom), Some(1));
     assert_eq!(ida.alloc(&dom), Some(2));
-    ida.dealloc(1);
+    ida.unset(1);
     assert_eq!(ida.alloc(&dom), Some(1));
     assert_eq!(ida.alloc(&dom), Some(3));
-    ida.dealloc(3);
+    ida.unset(3);
     assert_eq!(ida.alloc(&dom), Some(3));
     assert_eq!(ida.alloc(&dom), Some(4));
 }
@@ -109,6 +109,11 @@ pub macro wrapip($ty:ident, $inner:ty, $addr:ident, $host:ident, $fnew:ident) {
                 ),
                 $host: self.$host,
             }
+        }
+    }
+    impl From<$inner> for $ty {
+        fn from(val: $inner) -> $ty {
+            $ty::$fnew(val, 0)
         }
     }
     impl $ty {
