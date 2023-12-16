@@ -19,8 +19,8 @@ use super::*;
 use crate::{
     data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation},
     managed::{
-        Indexed, ItemAction, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, SrcDeps,
-        SrcNode,
+        Indexed, ItemAction, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, NDeps,
+        NodeIndexed, IRelation,
     },
     paths::PathState,
 };
@@ -46,26 +46,26 @@ impl<'n, 'd> MItem for NodeWDeps<'n, 'd> {
 }
 
 /// Represents the probe
-impl<'k> MItem for SrcNode<'k> {
+impl<'k> MItem for NodeIndexed<'k> {
     type Param = ();
     type Serv = Systemd;
 }
 
-impl<'k> MItem for SrcDeps<'k> {
+impl<'k> MItem for NDeps<'k> {
     type Param = ();
     type Serv = Systemd;
 }
 
 // Therefore, the items are different perspectives upon the graph, by which we peform actions.
 
-impl<'k> ItemRM for SrcNode<'k> {
+impl<'k> ItemRM for NodeIndexed<'k> {
     async fn remove(&self, serv: &Self::Serv) -> Result<()> {
         remove_file(serv.systemd_unit.join(self.service()?))?;
         Ok(())
     }
 }
 
-impl<'k> ItemAction for SrcNode<'k> {
+impl<'k> ItemAction for NodeIndexed<'k> {
     async fn restart(
         &self,
         _serv: &Self::Serv,
@@ -88,23 +88,23 @@ impl<'k> ItemAction for SrcNode<'k> {
     }
 }
 
-pub fn units(ve: &SrcDeps<'_>) -> Result<HashSet<String>> {
+pub fn units(ve: &NDeps<'_>) -> Result<HashSet<String>> {
     let mut units = HashSet::new();
-    for Indexed { id, item } in ve {
-        let re = match item {
+    for IRelation { edge, .. } in ve {
+        let re = match edge.item {
             Relation::SendSocket(p) => &p.receiver,
             Relation::SendTUN(p) => &p.receiver,
         };
         match re {
             FDRecver::Systemd(se) => units.insert(se.to_owned()),
-            FDRecver::TUN2Proxy(pa) => units.insert(Socks2TUN::new(&pa, *id)?.service()?),
+            FDRecver::TUN2Proxy(pa) => units.insert(Socks2TUN::new(&pa, edge.id)?.service()?),
             _ => false,
         };
     }
     Ok(units)
 }
 
-impl<'k> ItemAction for SrcDeps<'k> {
+impl<'k> ItemAction for NDeps<'k> {
     async fn restart(
         &self,
         serv: &Self::Serv,
@@ -138,7 +138,7 @@ pub trait UnitName {
     }
 }
 
-impl<'k> UnitName for SrcNode<'k> {
+impl<'k> UnitName for NodeIndexed<'k> {
     fn stem(&self) -> Result<String> {
         Ok(format!("probe{}", self.id.index()))
     }
@@ -151,14 +151,14 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
         let relations = &self.1;
         let servname = place.service()?;
         let mut deps = Vec::new();
-        for Indexed { id, item: rel } in relations.iter() {
-            let rec = match rel {
+        for IRelation { edge, .. } in relations.iter() {
+            let rec = match edge.item {
                 Relation::SendTUN(pf) => &pf.receiver,
                 Relation::SendSocket(pf) => &pf.receiver,
             };
             let unit: String = match rec {
                 FDRecver::Systemd(unit_name) => unit_name.clone(),
-                FDRecver::TUN2Proxy(confpath) => Socks2TUN { confpath, ix: *id }.service()?,
+                FDRecver::TUN2Proxy(confpath) => Socks2TUN { confpath, ix: edge.id }.service()?,
                 FDRecver::DontCare => continue,
             };
             deps.push(unit);

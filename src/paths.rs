@@ -69,6 +69,9 @@ impl PathState {
     fn user(&self) -> PathBuf {
         self.priv_binds.join("user")
     }
+    fn user_nomnt(&self) -> PathBuf {
+        self.state.join("user_nomnt.pid")
+    }
     fn userns(&self) -> UserNS {
         UserNS(&self)
     }

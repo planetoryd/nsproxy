@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    env::var,
     fs::{
         create_dir, create_dir_all, read_dir, remove_dir_all, remove_file, File, FileType,
         OpenOptions,
@@ -13,11 +14,9 @@ use std::{
     sync::mpsc::sync_channel,
 };
 
-use amplify::default;
 use anyhow::{bail, ensure};
 use daggy::NodeIndex;
 use libc::{pid_t, stat, syscall, uid_t};
-use nsproxy_common::Validate;
 
 use super::*;
 use crate::{
@@ -29,7 +28,9 @@ use nix::{
     mount::{mount, umount, MsFlags},
     sched::{setns, unshare, CloneFlags},
     sys::{signal::kill, stat::fstat, wait::waitpid},
-    unistd::{fork, getuid, seteuid, setresgid, setresuid, setuid, ForkResult, Gid, Pid, Uid},
+    unistd::{
+        fork, getresuid, getuid, seteuid, setresgid, setresuid, setuid, ForkResult, Gid, Pid, Uid,
+    },
 };
 
 use std::{mem::size_of, os::fd::RawFd};
@@ -43,7 +44,7 @@ use nix::{
 
 fn mount_single(mut pid: PidPath, binds: &Binds, really: bool, name: &str) -> Result<ExactNS> {
     // let name = K::NAME;
-    pid = pid.to_n();
+    // pid = pid.to_n();
     let path: PathBuf = ["/proc", pid.to_str().as_ref(), "ns", name]
         .iter()
         .collect();
@@ -72,7 +73,17 @@ impl<K: NSTrait> NSSlot<ExactNS, K> {
     fn mount(mut pid: PidPath, binds: &Binds, really: bool) -> Result<Self> {
         let name = K::NAME;
         let e = mount_single(pid, binds, really, name)?;
-        Ok(NSSlot::Provided(e, default!()))
+        Ok(NSSlot::Provided(e, Default::default()))
+    }
+    fn source(mut self, replace: NSSource) -> Self {
+        match self {
+            NSSlot::Absent => (),
+            NSSlot::Provided(ref mut n, _) => n.source = replace,
+        };
+        self
+    }
+    fn absent(&self) -> bool {
+        matches!(self, Self::Absent)
     }
 }
 
@@ -176,6 +187,7 @@ impl NSEnter for NSSource {
                 let fd = unsafe { pidfd::PidFd::open(*p, 0) }?;
                 setns(fd, f)?;
             }
+            Self::Unavail => unreachable!(),
         }
         Ok(())
     }
@@ -190,6 +202,7 @@ impl NSEnter for ExactNS {
 pub trait NSEnter {
     fn enter(&self, f: CloneFlags) -> Result<()>;
 }
+
 pub struct UserNS<'p>(pub &'p PathState);
 
 #[test]
@@ -347,8 +360,8 @@ impl<'p> UserNS<'p> {
     fn procns(&self) -> Result<NSGroup> {
         let (user, mnt) = self.paths();
         Ok(NSGroup {
-            user: NSSlot::Provided(ExactNS::from_source(user)?, default!()),
-            mnt: NSSlot::Provided(ExactNS::from_source(mnt)?, default!()),
+            user: NSSlot::Provided(ExactNS::from_source(user)?, Default::default()),
+            mnt: NSSlot::Provided(ExactNS::from_source(mnt)?, Default::default()),
             ..Default::default()
         })
     }
@@ -425,7 +438,7 @@ pub fn your_shell(specify: Option<String>) -> Result<Option<String>> {
     Ok(match specify {
         Some(k) => Some(k),
         None => {
-            let d = std::env::var("SHELL");
+            let d = var("SHELL");
             if d.is_err() {
                 Some("fish".to_owned())
             } else {
@@ -435,7 +448,7 @@ pub fn your_shell(specify: Option<String>) -> Result<Option<String>> {
     })
 }
 
-pub fn enable_ping() -> Result<()> {
+pub fn enable_ping_all() -> Result<()> {
     let mut f = File::options()
         .write(true)
         .open("/proc/sys/net/ipv4/ping_group_range")?;
@@ -443,21 +456,41 @@ pub fn enable_ping() -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_uid(uid: Option<u32>) -> Result<()> {
-    let u = Uid::from_raw(find_uid(uid)?);
+pub fn enable_ping_gid(gid: Gid) -> Result<()> {
+    let mut f = File::options()
+        .write(true)
+        .open("/proc/sys/net/ipv4/ping_group_range")?;
+    f.write_all(format!("{gid} {gid}").as_bytes())?;
+    Ok(())
+}
+
+pub fn cmd_uid(uid: Option<u32>, allow_root: bool) -> Result<()> {
+    let u = Uid::from_raw(what_uid(uid, allow_root)?);
     setresuid(u, u, u)?;
     Ok(())
 }
 
-pub fn find_uid(uid: Option<u32>) -> Result<u32> {
+pub fn what_uid(uid: Option<u32>, allow_root: bool) -> Result<u32> {
     if let Some(u) = uid {
         Ok(u)
     } else {
-        let sudoid = std::env::var("SUDO_UID");
-        if let Ok(id) = sudoid {
+        if let Ok(id) = var(UID_HINT_VAR) {
+            Ok(id.parse()?)
+        } else if let Ok(id) = var("SUDO_UID") {
             Ok(id.parse()?)
         } else {
-            Ok(1000)
+            let res = getresuid()?;
+            if !res.real.is_root() {
+                Ok(res.real.as_raw())
+            } else if let Ok(kde) = var("KDE_SESSION_UID") {
+                Ok(kde.parse()?)
+            } else {
+                if allow_root {
+                    Ok(0)
+                } else {
+                    bail!("unable to find a non-root uid")
+                }
+            }
         }
     }
 }

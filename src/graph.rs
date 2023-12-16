@@ -7,10 +7,7 @@ use std::{io::Read, path::PathBuf};
 
 use super::*;
 use crate::{
-    data::{
-        ExactNS, Graphs, Ix, NSGroup, NodeI, NSGraph, ObjectNode, Relation, Route,
-        RouteNode,
-    },
+    data::{ExactNS, Graphs, Ix, NSGraph, NSGroup, NodeI, ObjectNode, Relation, Route, RouteNode, Validate},
     paths::{PathState, Paths},
 };
 
@@ -20,22 +17,18 @@ use daggy::{
     stable_dag::StableDag,
     Dag,
 };
-use nsproxy_common::{VaCache, ValidationErr, PidPath::Selfproc};
-use nsproxy_common::{Validate, ValidateScoped};
+use nsproxy_common::{PidPath::Selfproc, VaCache, ValidationErr};
 use petgraph::visit::IntoNodeReferences;
 use serde_json::{from_str, to_string_pretty};
+use tracing::info;
 
 impl Graphs {
-    pub fn prune(&mut self, outside: bool, va: &mut VaCache) -> Result<()> {
-        let ctx = NSGroup::proc_path(Selfproc)?;
+    pub fn prune(&mut self, va: &mut VaCache) -> Result<()> {
+        let ctx = NSGroup::proc_path(Selfproc, None)?;
         let mut remove = Vec::new();
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
-                let rx = if outside {
-                    k.main.validate_out(va, &ctx)
-                } else {
-                    k.main.validate_in(va, &ctx)
-                };
+                let rx = k.main.validate(va, &ctx);
                 if let Err(er) = rx {
                     let expected = er.downcast::<ValidationErr>()?;
                     log::info!("Removing NS node {} for {}", k.main.key(), expected);
@@ -57,6 +50,7 @@ impl Graphs {
     }
     pub fn load_file(path: &PathState) -> Result<Self> {
         let gp = Self::path(path);
+        info!("Load graphs from {:?}", &gp);
         if gp.exists() {
             let mut file = std::fs::File::open(&gp)?;
             let mut st = Default::default();

@@ -4,9 +4,10 @@ use std::borrow::Borrow;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::io::ErrorKind;
-use std::path::{Display, Path};
+use std::path::Path;
 use std::{borrow::Cow, os::fd::AsRawFd, path::PathBuf};
 
 use anyhow::ensure;
@@ -16,16 +17,8 @@ use indexmap::{Equivalent, IndexMap};
 use libc::stat;
 use nix::errno::Errno;
 use nix::{libc::pid_t, unistd::getpid};
+use owo_colors::OwoColorize;
 use serde::{de::Visitor, Deserialize, Serialize};
-
-pub trait Validate<C: NCtx> {
-    fn validate(&self, cache: &mut VaCache, ctx: &C) -> Result<()>;
-}
-
-pub trait ValidateScoped<C: NCtx> {
-    fn validate_out(&self, cache: &mut VaCache, ctx: &C) -> Result<()>;
-    fn validate_in(&self, cache: &mut VaCache, ctx: &C) -> Result<()>;
-}
 
 /// Represents an NS anchored to a process, or a file
 /// Equality iff .unique equals
@@ -34,6 +27,17 @@ pub trait ValidateScoped<C: NCtx> {
 struct ExactNS {
     unique: UniqueFile,
     source: NSSource,
+}
+
+impl Display for ExactNS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("File {} ", self.unique.yellow()))?;
+        match self.source {
+            NSSource::Pid(ref p) => f.write_fmt(format_args!("from pid {}", p.bright_purple())),
+            NSSource::Path(ref p) => f.write_fmt(format_args!("at {:?}", p.yellow())),
+            NSSource::Unavail => f.write_fmt(format_args!("{}", "Unavailable".magenta())),
+        }
+    }
 }
 
 /// We don't care about the means.
@@ -148,7 +152,11 @@ impl NSFrom<PathBuf> for ExactNS {
 
 impl NSFrom<(PidPath, &str)> for ExactNS {
     fn from_source(source: (PidPath, &str)) -> Result<Self> {
-        let path = PathBuf::from(format!("/proc/{}/ns/{}", source.0.to_str(), source.1));
+        let path = PathBuf::from(format!(
+            "/proc/{}/ns/{}",
+            source.0.to_n().to_str(),
+            source.1
+        ));
         NSFrom::from_source(path)
     }
 }
@@ -163,7 +171,7 @@ impl NSFrom<pid_t> for ExactNS {
 }
 
 impl UniqueFile {
-    fn validate(&self, fst: &stat) -> Result<(), ValidationErr> {
+    pub fn validate(&self, fst: &stat) -> Result<(), ValidationErr> {
         if fst.st_ino == self.ino && fst.st_dev == self.dev {
             Ok(())
         } else {
@@ -186,23 +194,10 @@ pub enum ValidationErr {
 pub enum NSSource {
     Pid(pid_t),
     Path(PathBuf),
-}
-
-impl<C: NCtx> Validate<C> for ExactNS {
-    /// Checking if the ino and dev of the specified file matches the recorded stat
-    fn validate(&self, cache: &mut VaCache, ctx: &C) -> Result<()> {
-        match &self.source {
-            NSSource::Path(p) => {
-                let st = cached_stat(cache, (p, ctx.mnt()))?;
-                self.unique.validate(st)?;
-            }
-            NSSource::Pid(p) => {
-                let st = cached_fstat(cache, (*p, ctx.pid()))?;
-                self.unique.validate(st)?;
-            }
-        }
-        Ok(())
-    }
+    /// Ex. running as an unprivileged process, the root NS can't be stated. 
+    /// And we don't keep ephemeral proc fs paths either
+    /// Treated as path when validating
+    Unavail,
 }
 
 #[derive(Default)]
@@ -219,11 +214,6 @@ fn getbyref() {
     va.pid.get(&(0, &uq));
     let pa = PathBuf::new();
     va.mnt.get(&(&pa, &uq));
-}
-
-pub trait NCtx {
-    fn mnt(&self) -> &UniqueFile;
-    fn pid(&self) -> &UniqueFile;
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -314,8 +304,15 @@ pub fn pidfd_uf(k: pid_t) -> Result<stat> {
 
 pub fn cached_stat<'k>(ca: &'k mut VaCache, path: NMnt) -> Result<&'k stat> {
     ca.mnt.cached_get(&path, |k| {
-        let st = nix::sys::stat::stat::<Path>(k.0.as_path())?;
-        Ok(st)
+        let st = nix::sys::stat::stat::<Path>(k.0.as_path());
+        if let Err(ref e) = st {
+            match e {
+                Errno::ENOENT => Err(ValidationErr::FileNonExist.into()),
+                _ => Err(st.unwrap_err().into()),
+            }
+        } else {
+            Ok(st.unwrap())
+        }
     })
 }
 

@@ -1,7 +1,10 @@
 //! Executor of ObjectGraph
 //! Allow for other means of process/task scheduling, managing.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 use anyhow::anyhow;
 use daggy::{
@@ -11,6 +14,7 @@ use daggy::{
     },
     EdgeIndex, NodeIndex,
 };
+use owo_colors::OwoColorize;
 use tun::Layer;
 
 use super::*;
@@ -32,10 +36,34 @@ pub trait ServiceM: Sized {
     async fn ctx<'p>(&'p self) -> Result<Self::Ctx<'p>>;
 }
 
-pub type SrcNode<'k> = Indexed<NodeI, &'k ObjectNode>;
-pub type SrcDeps<'k> = Vec<Indexed<EdgeI, &'k Relation>>;
-pub type NodeWDeps<'n, 'd> = (SrcNode<'n>, SrcDeps<'d>);
-pub type IRelation<'k> = Indexed<EdgeI, &'k Relation>;
+pub type NodeIndexed<'k> = Indexed<NodeI, &'k ObjectNode>;
+pub type NDeps<'k> = Vec<IRelation<'k>>;
+pub type NodeWDeps<'n, 'd> = (NodeIndexed<'n>, NDeps<'d>);
+#[public]
+pub struct IRelation<'k> {
+    edge: Indexed<EdgeI, &'k Relation>,
+    dst: NodeIndexed<'k>,
+}
+
+impl Display for NodeIndexed<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let idp = NodeIDPrint(self.id, self.item.name.as_ref().map(|k| k.as_str()));
+        f.write_fmt(format_args!("{}", idp))?;
+        f.write_fmt(format_args!("{}", self.item.main))
+    }
+}
+
+pub struct NodeIDPrint<'k>(pub NodeI, pub Option<&'k str>);
+
+impl<'k> Display for NodeIDPrint<'k> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("NS Node {} ", self.0.index().bright_yellow()))?;
+        match &self.1 {
+            None => f.write_fmt(format_args!("{}\n", "unnamed".bright_black())),
+            Some(n) => f.write_fmt(format_args!("{}\n", n.bright_yellow())),
+        }
+    }
+}
 
 /// Modeled after systemd
 pub trait MItem {
@@ -139,11 +167,25 @@ impl Graphs {
             .collect::<Vec<_>>();
         let ew = ed
             .iter()
-            .map(|e| Indexed {
-                id: e.id(),
-                item: e.weight().as_ref().unwrap(),
+            .map(|e| {
+                Ok::<_, anyhow::Error>(IRelation {
+                    edge: Indexed {
+                        id: e.id(),
+                        item: e.weight().as_ref().unwrap(),
+                    },
+                    dst: Indexed {
+                        id: e.target(),
+                        item: self
+                            .data
+                            .node_weight(e.target())
+                            .as_ref()
+                            .ok_or(anyhow!("target node does not exist"))?
+                            .as_ref()
+                            .unwrap(),
+                    },
+                })
             })
-            .collect::<Vec<_>>();
+            .try_collect::<Vec<_>>()?;
         let srcnode = Indexed {
             id,
             item: self

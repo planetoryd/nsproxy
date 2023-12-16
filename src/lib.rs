@@ -5,6 +5,8 @@
 #![feature(impl_trait_projections)]
 #![feature(associated_type_defaults)]
 #![allow(async_fn_in_trait)]
+#![feature(iterator_try_collect)]
+#![feature(error_generic_member_access)]
 
 pub mod data;
 pub mod flatpak;
@@ -37,3 +39,4 @@ pub macro aok() {
 }
 
 pub const PROBE_TUN: &str = "tunp";
+pub const UID_HINT_VAR: &str = "NSPROXY_UID";
