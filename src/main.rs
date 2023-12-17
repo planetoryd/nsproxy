@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::future::Future;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -14,7 +13,6 @@ use std::{fs::File, io::Read, os::fd::AsFd, path::PathBuf};
 use anyhow::{anyhow, bail, ensure};
 use capctl::prctl;
 use clap::{Parser, Subcommand};
-use daggy::petgraph::data::Build;
 use id_alloc::NetRange;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use libc::{uid_t, SIGTERM};
@@ -22,7 +20,7 @@ use log::LevelFilter::{self, Debug};
 use netlink_ops::netlink::{nl_ctx, NLDriver, NLHandle, VethConn};
 use netlink_ops::rtnetlink::netlink_proto::{new_connection_from_socket, NetlinkCodec};
 use netlink_ops::rtnetlink::netlink_sys::protocols::NETLINK_ROUTE;
-use netlink_ops::rtnetlink::netlink_sys::{AsyncSocket, Socket, TokioSocket};
+use netlink_ops::rtnetlink::netlink_sys::{Socket, TokioSocket};
 use netlink_ops::rtnetlink::Handle;
 use netlink_ops::state::{Existence, ExpCollection};
 use nix::sched::{setns, unshare, CloneFlags};
@@ -48,12 +46,12 @@ use owo_colors::OwoColorize;
 use passfd::FdPassingExt;
 use petgraph::visit::IntoNodeReferences;
 use std::os::unix::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::instrument::WithSubscriber;
 use tracing::{info, warn, Level};
 use tracing_log::LogTracer;
 use tracing_subscriber::FmtSubscriber;
-use tun::{AsyncDevice, Configuration, Layer};
+use tun::{AsyncDevice, Configuration, Device, Layer};
 
 #[derive(Parser)]
 #[command(
@@ -169,6 +167,7 @@ fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
     LogTracer::init()?;
     info!("SHA1: {}", env!("VERGEN_GIT_SHA"));
+    let cwd = std::env::current_dir()?;
 
     let cli = Cli::parse();
     let paths: Paths = PathState::default()?.into();
@@ -239,7 +238,7 @@ fn main() -> Result<()> {
                         f.write_all(format!("{gid} {gid} 1",).as_bytes())?;
                         // let spid = getpid();
                         uns = Some(NSGroup {
-                            /// we have unshared user ns
+                            // we have unshared user ns
                             user: NSSlot::from_source(PidPath::Selfproc)?,
                             ..Default::default()
                         });
@@ -275,7 +274,7 @@ fn main() -> Result<()> {
                         ))?);
                         // We don't change uid of this process.
                         // Otherwise probe might fail due to perms
-
+                        cmd.current_dir(cwd);
                         cmd.uid(uid);
                         // NOTE: when parent process crashed, the child process fish shell got broken stdout and stderr
                         // It probably dead looped on it and ate up the CPU.
@@ -390,17 +389,25 @@ fn main() -> Result<()> {
             let devfd: RawFd = conn.recv_fd()?;
             log::info!("Got FD");
             let mut cf = File::open(&conf)?;
-            let args: tun2socks5::IArgs = serde_json::from_reader(&mut cf)?;
-            log::info!("{:?}", args);
+            let mut args: tun2socks5::IArgs = serde_json::from_reader(&mut cf)?;
             let devconf = Configuration::default();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             rt.block_on(async {
                 let dev = tun::platform::linux::Device::from_raw_fd(devfd, &devconf)?;
+                if let Some(ref mut p) = args.state {
+                    let mut f = p.file_name().unwrap().to_owned();
+                    let netns = ExactNS::from_source((PidPath::Selfproc, "net"))?;
+                    f.push(format!("_ns_{}", netns.unique));
+                    // WARN This will cause problems when you have multiple TUNs in one NS, and use one config
+                    p.set_file_name(f);
+                }
+                log::info!("{:?}", args);
                 let dev = AsyncDevice::new(dev)?;
-                let (sx, rx) = mpsc::channel(1);
-                tun2socks5::main_entry(dev, 1500, true, args, rx).await?;
+
+                let (sx, rx) = oneshot::channel();
+                tun2socks5::main_entry(dev, 1500, true, args, rx, sx).await?;
 
                 aok!()
             })?;
@@ -469,10 +476,12 @@ fn main() -> Result<()> {
                             .as_ref() // Second one is an invariant
                             .unwrap();
                         let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
+                        let cwd = std::env::current_dir()?;
                         node.main.enter(&ctx)?;
                         cmd_uid(uid, true)?;
                         let mut cmd =
                             Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
+                        cmd.current_dir(cwd);
                         cmd.spawn()?.wait()?;
                     }
                     NodeOps::Logs { lines } => {
@@ -635,8 +644,10 @@ fn main() -> Result<()> {
             setns(f, CloneFlags::CLONE_NEWNET)?;
             cmd_uid(uid, true)?;
             let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
+            cmd.current_dir(cwd);
             cmd.spawn()?.wait()?;
         }
+        _ => todo!(),
     }
     Ok(())
 }

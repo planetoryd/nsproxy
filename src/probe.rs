@@ -1,9 +1,9 @@
 //! Pass TUNTAP / TCP socket FDs to proxies, and the creation thereof
 
-use std::os::{
+use std::{os::{
     fd::{AsRawFd, RawFd},
     unix::net::UnixStream,
-};
+}, io::Write};
 
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockProtocol, SockType};
 use passfd::FdPassingExt;

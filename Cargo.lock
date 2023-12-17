@@ -416,6 +416,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.68.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1418,6 +1427,7 @@ dependencies = [
  "derive-new",
  "ipnetwork 0.20.0",
  "rangemap",
+ "serde",
  "thiserror",
 ]
 
@@ -2434,6 +2444,9 @@ name = "rangemap"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "977b1e897f9d764566891689e642653e5ed90c6895106acd005eb4c1d0203991"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "raw-cpuid"
@@ -3216,6 +3229,7 @@ dependencies = [
  "async-recursion",
  "async-trait",
  "base64",
+ "bincode",
  "clap",
  "ctrlc2",
  "digest_auth",

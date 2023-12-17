@@ -10,9 +10,11 @@ fn main() -> Result<()> {
         ipv6_enabled: true,
         dns: ArgDns::Handled,
         dns_addr: "127.0.0.1".parse()?,
-        bypass: Default::default()
+        bypass: Default::default(),
+        state: None
     };
     let s = to_string_pretty(&ia)?;
     println!("{}", &s);
+
     Ok(())
 }

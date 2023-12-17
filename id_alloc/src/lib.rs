@@ -12,7 +12,7 @@ pub use ipnetwork::{IpNetwork, IpNetworkError, Ipv4Network, Ipv6Network};
 use rangemap::{RangeInclusiveSet, StepFns, StepLite};
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 /// ID allocator implemented with range set
 pub struct IDAlloc<T: Ord + Clone + StepLite>(pub RangeInclusiveSet<T>);
 
@@ -80,11 +80,13 @@ fn rset() {
 
 use derivative::Derivative;
 
+use serde::{Deserialize, Serialize};
+
 wrapip!(Ipv4A, Ipv4Addr, addr, host, new);
 wrapip!(Ipv6A, Ipv6Addr, addr, host, new);
 
 pub macro wrapip($ty:ident, $inner:ty, $addr:ident, $host:ident, $fnew:ident) {
-    #[derive(Clone, Copy, Debug, Derivative)]
+    #[derive(Clone, Copy, Debug, Derivative, Serialize, Deserialize)]
     #[derivative(PartialEq, PartialOrd, Ord, Eq)]
     pub struct $ty {
         pub $addr: $inner,

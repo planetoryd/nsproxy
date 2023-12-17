@@ -1,11 +1,12 @@
 {
-    "proxy": {
-      "proxy_type": "Socks5",
-      "addr": "127.0.0.1:9909",
-      "credentials": null
-    },
-    "ipv6_enabled": true,
-    "dns": "Handled",
-    "dns_addr": "127.0.0.1",
-    "bypass": []
-  }
+  "proxy": {
+    "proxy_type": "Socks5",
+    "addr": "127.0.0.1:9909",
+    "credentials": null
+  },
+  "ipv6_enabled": true,
+  "dns": "Handled",
+  "dns_addr": "127.0.0.1",
+  "bypass": [],
+  "state": "/tmp/tun2dns"
+}
