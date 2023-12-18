@@ -9,7 +9,7 @@ Kernel-namespaces-based alternative to proxychains.
 - Firefox and its derivatives, leak traffic even with SOCKS5 proxy configured
     - Browsers in general have a lot of telemetry, which is unacceptable for what this project is trying to do.
 - Proxychains may silently fail and leak traffic (but it's a great tool if you put it in a netns which nullfies the downsides)
-- Nsproxy creates containers which better suits the OPSEC use case than https://github.com/SagerNet/sing-box 
+- Nsproxy creates containers which better suits the OPSEC use case than [sing-box](https://github.com/SagerNet/sing-box)
 - [Tun2socks](https://github.com/xjasonlyu/tun2socks) does not have virtual DNS
 - VPNs (in the sense the binaries VPN vendors distribute) do not care about the OPSEC usecase. 
 
@@ -41,5 +41,6 @@ The app
 - If your app works with SOCKS5
     - You just connect to the SOCKS5 endpoint in the container
 
+## Fix flatpak networking, sideways.
 
-
+Currently it's not recommended (bad for anonymity) to have multiple instances of an app because the data could not be segregated, see [the issue](https://github.com/flatpak/flatpak/issues/1170).

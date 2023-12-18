@@ -500,6 +500,8 @@ struct Graphs {
     /// For simplicity, for one netns, only one object may exist, and other NSes are attached to it.
     map: HashMap<UniqueFile, NodeI>,
     name: BiMap<String, NodeI>,
+    #[serde(skip)]
+    file: Option<std::fs::File>
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]

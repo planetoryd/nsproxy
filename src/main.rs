@@ -30,6 +30,7 @@ use nsproxy::data::{
     FDRecver, Graphs, NSAdd, NSGroup, NSSlot, NSState, NodeAddr, NodeI, ObjectNode, PassFD,
     Relation, Validate, ValidateR, TUNC,
 };
+use nsproxy::flatpak::FlatpakID;
 use nsproxy::managed::{
     Indexed, ItemAction, ItemCreate, NodeIDPrint, NodeIndexed, NodeWDeps, ServiceM, Socks2TUN,
 };
@@ -38,6 +39,7 @@ use nsproxy::sys::{
     check_capsys, cmd_uid, enable_ping_all, enable_ping_gid, what_uid, your_shell, UserNS,
 };
 use nsproxy::systemd::UnitName;
+use nsproxy::watcher::FlatpakWatcher;
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
 use nsproxy_common::NSSource::Unavail;
@@ -84,8 +86,13 @@ enum Commands {
         #[arg(long)]
         new_userns: bool,
     },
-    /// Start as watcher daemon
-    Watch {},
+    /// Start as watcher daemon. This uses the socks2tun method.
+    Watch {
+        /// And you can only specify one config
+        path: PathBuf,
+        #[arg(long, short)]
+        dryrun: bool,
+    },
     /// Run probe process acccording to the graph. ID for Node ID
     Probe {
         id: Ix,
@@ -121,7 +128,8 @@ enum Commands {
         #[command(subcommand)]
         op: Option<NodeOps>,
     },
-    /// It's recommended to use this through "sproxy" the SUID wrapper
+    /// You should use this through "sproxy" the SUID wrapper if you are not in a userns.
+    /// It tries to find an unallocated subnet, and the created NS is not registered in the state file.
     Veth {
         #[arg(long, short)]
         uid: Option<u32>,
@@ -329,6 +337,7 @@ fn main() -> Result<()> {
                 let (probe, deps) = graphs.nodewdeps(src)?;
                 deps.restart(&serv, &ctx).await?;
                 probe.restart(&serv, &ctx).await?;
+                graphs.close()?;
                 aok!()
             })?;
             sp.write_all(&[2])?;
@@ -412,7 +421,69 @@ fn main() -> Result<()> {
                 aok!()
             })?;
         }
-        Commands::Watch {} => {}
+        Commands::Watch { path, dryrun } => {
+            let uid = what_uid(None, false)?;
+            let mut fpwatch = FlatpakWatcher::default();
+            let fpath = paths.flatpak();
+            if !fpath.exists() {
+                tracing::error!("You must specify a list of apps to proxy at {:?}", &fpath);
+                return Ok(());
+            }
+            // TODO, weird enoguh, for a flatpak process the mnt ns cant be entered EPERM
+            info!("Load {:?}", &fpath);
+            let mut fapps = std::fs::File::open(&fpath)?;
+            let list_apps: Vec<FlatpakID> = serde_json::from_reader(&mut fapps)?;
+            let brred: Vec<_> = list_apps.iter().map(|k| k).collect();
+            crate::flatpak::adapt_flatpak(brred, dryrun)?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                let (sx, mut rx) = mpsc::channel(5);
+                let pre = zbus::Connection::session().await?;
+                let dae = tokio::spawn(fpwatch.daemon(uid, sx));
+                let looper = async move {
+                    let serv = systemd::Systemd::new(&paths, pre).await?;
+                    let ctx = serv.ctx().await?;
+                    while let Some(fe) = rx.recv().await {
+                        if dryrun {
+                            continue;
+                        }
+                        let mut graphs = Graphs::load_file(&paths)?;
+                        let src = graphs.add_ns(
+                            PidPath::N(fe.pid.try_into()?),
+                            &paths,
+                            None,
+                            NSAdd::RecordProcfsPaths,
+                        )?;
+                        graphs.name.insert(fe.name(), src);
+                        let out =
+                            graphs.add_ns(PidPath::Selfproc, &paths, None, NSAdd::RecordNothing)?;
+                        let edge = graphs.data.add_edge(src, out, None);
+                        log::info!(
+                            "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
+                            graphs.data[src].as_ref().unwrap().main.key()
+                        );
+                        let socks2t = Socks2TUN::new(&path, edge)?;
+                        let rel = socks2t.write(Layer::L3, &serv).await?;
+                        graphs.data[edge].replace(rel);
+                        graphs.dump_file(&paths)?;
+                        graphs.write_probes(&serv).await?;
+                        serv.reload(&ctx).await?;
+                        let (probe, deps) = graphs.nodewdeps(src)?;
+                        deps.restart(&serv, &ctx).await?;
+                        probe.restart(&serv, &ctx).await?;
+
+                        graphs.close()?;
+                    }
+
+                    aok!()
+                };
+                tokio::select! { h = dae => h??, h = looper => h?};
+
+                aok!()
+            })?;
+        }
         Commands::Init { undo } => {
             let usern = UserNS(&paths);
             check_capsys()?;

@@ -16,6 +16,7 @@ pub mod paths;
 pub mod probe;
 pub mod sys;
 pub mod systemd;
+pub mod watcher;
 
 use std::{borrow::Cow, path::Path};
 
@@ -23,7 +24,6 @@ pub use anyhow::Result;
 pub use fully_pub::fully_pub as public;
 pub use libc::pid_t; // make everything pub
 
-use nix::unistd::getpid;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

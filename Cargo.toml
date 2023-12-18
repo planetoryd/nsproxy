@@ -71,6 +71,10 @@ tracing-subscriber = "0.3.18"
 tracing-log = "0.2.0"
 bimap = { version = "0.6.3", features = ["serde"] }
 owo-colors = "3.5.0"
+inotify = "0.10.2"
+futures = "0.3.29"
+procfs = "0.16.0"
+fs4 = "0.7.0"
 # daemonize-me = "2.0.1"
 
 [build-dependencies]

@@ -1,39 +1,39 @@
+use anyhow::{anyhow, Ok, Result};
+use futures::StreamExt;
+use inotify::{Event, EventMask, WatchMask};
+use std::result::Result as stdRes;
 use std::{
     collections::HashSet,
     ffi::OsString,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
-
-use netlink_ops::netns::Pid;
-
-use anyhow::{Ok, Result};
-use futures::StreamExt;
-use inotify::{Event, EventMask, WatchMask};
-use rumpsteak::{try_session, IntoSession};
-use std::result::Result as stdRes;
+use tokio::sync::mpsc::Sender;
 use tokio::{fs, io::AsyncReadExt, sync::mpsc::UnboundedSender};
 
 use crate::flatpak::FlatpakID;
 
-pub trait Watcher: Sized {
-    async fn new() -> Result<Self>;
-    async fn daemon(self) -> Result<()>;
-}
-
+#[derive(Default)]
 pub struct FlatpakWatcher {
     seen_pid: HashSet<Pid>,
 }
 
-impl Watcher for FlatpakWatcher {
-    async fn new() -> Result<Self> {
-        Ok(Self {
-            seen_pid: Default::default(),
-        })
+#[derive(Hash, PartialEq, Eq)]
+pub struct Pid(pub u32);
+
+pub struct FEvent {
+    pub pid: u32,
+    pub flatpak: FlatpakID,
+}
+
+impl FEvent {
+    pub fn name(&self) -> String {
+        format!("{}_{}", self.flatpak.0, self.pid)
     }
-    async fn daemon(mut self) -> Result<()> {
-        use crate::util::perms::get_non_priv_user;
-        let (uid, ..) = get_non_priv_user(None, None, None, None)?;
+}
+
+impl FlatpakWatcher {
+    pub async fn daemon(mut self, uid: u32, sx: Sender<FEvent>) -> Result<()> {
         let flatpak_dir = PathBuf::from(format!("/run/user/{}/.flatpak/", uid));
         let mut inoti = inotify::Inotify::init()?;
         inoti
@@ -48,9 +48,7 @@ impl Watcher for FlatpakWatcher {
             // pid file -> bwrap --args 41 com.github.tchx84.Flatseal
             match event_or_error {
                 stdRes::Ok(ev) => {
-                    self.process_ev(ev, &flatpak_dir).await?;
-                    inoti = stream.into_inotify();
-                    stream = inoti.into_event_stream(&mut buf)?;
+                    self.process_ev(ev, &flatpak_dir, &sx).await?;
                 }
                 Err(e) => {
                     log::error!("fs watcher, {:?}", e);
@@ -59,10 +57,12 @@ impl Watcher for FlatpakWatcher {
         }
         Ok(())
     }
-}
-
-impl FlatpakWatcher {
-    async fn process_ev(&mut self, ev: Event<OsString>, flatpak_dir: &PathBuf) -> Result<()> {
+    async fn process_ev(
+        &mut self,
+        ev: Event<OsString>,
+        flatpak_dir: &PathBuf,
+        sx: &Sender<FEvent>,
+    ) -> Result<()> {
         if let Some(name) = ev.name {
             let name = name.to_string_lossy().into_owned();
             if let Result::Ok(num) = name.parse::<u32>() {
@@ -79,6 +79,10 @@ impl FlatpakWatcher {
 
                         let mut info = instance_dir.clone();
                         info.push("info");
+
+                        if !info.exists() {
+                            return Ok(());
+                        }
 
                         let mut info_file = tokio::fs::File::open(info).await?;
                         let mut instnace_info_str = String::new();
@@ -98,63 +102,20 @@ impl FlatpakWatcher {
                         let maint = proc.task_main_thread()?;
                         let children = maint.children()?;
                         anyhow::ensure!(children.len() >= 1);
+                        let the_pid = children[0] as u32;
 
-                        let the_child_pid = children[0] as u32;
+                        log::warn!(
+                            "Found new flatpak process pid {} of {}",
+                            the_pid,
+                            flatpak_id.0
+                        );
 
-                        let sname = format!("{}_{}", flatpak_id.0, the_child_pid);
-
-                        // if let Some(profile_name) = self.profiles.flatpak.get(&flatpak_id) {
-                        //     if let Some(profile) = self.profiles.profiles.get(profile_name) {
-                        //         try_session(&mut self.client, async move |se: Ctrl<'_, Client>| {
-                        //             let ctr = se
-                        //                 .into_session()
-                        //                 .selectc(
-                        //                     Initiate(
-                        //                         sname,
-                        //                         InitialParams {
-                        //                             user: crate::etypes::SetUser::Pid(Pid(
-                        //                                 the_child_pid,
-                        //                             )),
-                        //                             tun2proxy: profile.to_owned(),
-                        //                         },
-                        //                     ),
-                        //                     |k| CtrlMsg::SubjectMsg(SubjectMsg::Initiate(k)),
-                        //                 )
-                        //                 .await?;
-                        //             let fd = unsafe { pidfd::PidFd::open(the_child_pid as i32, 0) }
-                        //                 .unwrap();
-                        //             let fd1 = fd.as_raw_fd();
-                        //             let mut probe = probe::start().await?;
-                        //             let devfd = try_session(
-                        //                 &mut probe,
-                        //                 async move |se: probe::Probing<'_, Probe>| {
-                        //                     let se = se
-                        //                         .send(Enter {
-                        //                             fd: fd1,
-                        //                             flags: profile.setns, // decided by config
-                        //                         })
-                        //                         .await?;
-                        //                     let recv = se
-                        //                         .send(CreateDevice {
-                        //                             name: "s_tun".to_owned(),
-                        //                             typ: tidy_tuntap::Mode::Tun,
-                        //                         })
-                        //                         .await?;
-                        //                     let k = recv.receive().await?;
-                        //                     Result::<_, anyhow::Error>::Ok(k)
-                        //                 },
-                        //             )
-                        //             .await?;
-                        //             let k = ctr
-                        //                 .send(devfd)
-                        //                 .await?
-                        //                 .send(NSFd { fd: fd.as_raw_fd() })
-                        //                 .await?;
-                        //             Result::<_, anyhow::Error>::Ok(((), k))
-                        //         })
-                        //         .await?;
-                        //     }
-                        // }
+                        sx.send(FEvent {
+                            pid: the_pid,
+                            flatpak: flatpak_id,
+                        })
+                        .await
+                        .map_err(|_| anyhow!("send fail"))?;
                     }
                 }
             }

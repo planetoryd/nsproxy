@@ -78,6 +78,9 @@ impl PathState {
     fn tun2proxy(&self) -> PathBuf {
         self.config.join("tun2proxy")
     }
+    fn flatpak(&self) -> PathBuf {
+        self.config.join("flatpak.json")
+    }
 }
 
 pub struct Binds(pub PathBuf);
