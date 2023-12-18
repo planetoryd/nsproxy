@@ -3242,6 +3242,7 @@ dependencies = [
  "lru",
  "regex",
  "serde",
+ "serde_json",
  "socks5-impl",
  "thiserror",
  "tokio",

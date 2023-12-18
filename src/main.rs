@@ -406,7 +406,7 @@ fn main() -> Result<()> {
                 log::info!("{:?}", args);
                 let dev = AsyncDevice::new(dev)?;
 
-                let (sx, rx) = oneshot::channel();
+                let (sx, rx) = mpsc::channel(1);
                 tun2socks5::main_entry(dev, 1500, true, args, rx, sx).await?;
 
                 aok!()

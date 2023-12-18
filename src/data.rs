@@ -46,6 +46,8 @@ struct RouteNode {
 pub enum Relation {
     SendSocket(PassFD<SocketC>),
     SendTUN(PassFD<TUNC>),
+    // TODO: Veth. The proxy resides in a separate net ns (that may access the outside) in the user ns, apps connect to it with veths.
+    // The proxy starts a TUN, and each app routes to the ns
 }
 
 impl Display for Relation {
