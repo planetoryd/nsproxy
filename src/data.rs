@@ -5,6 +5,7 @@ use std::{
     fmt::Display,
     net::SocketAddr,
     ops::AddAssign,
+    os::fd::{AsRawFd, FromRawFd},
     path::PathBuf,
 };
 
@@ -16,13 +17,15 @@ use bimap::BiMap;
 use clap::ValueEnum;
 use derivative::Derivative;
 
+use linux_raw_sys::ioctl::NS_GET_USERNS;
 use netlink_ops::errors::ProgrammingError;
-use nix::sched::CloneFlags;
+use nix::sched::{setns, CloneFlags};
 use nsproxy_derive::Validate;
 
 use daggy::{petgraph::stable_graph::StableDiGraph, Dag, EdgeIndex, NodeIndex};
 use owo_colors::OwoColorize;
 use serde::{de::Visitor, Deserialize, Serialize};
+use tracing::info;
 use tun::Layer;
 
 pub use nsproxy_common::*;
@@ -273,7 +276,20 @@ pub fn mount_ns_by_pid(
 #[public]
 impl NSGroup {
     fn enter(&self, ctx: &NSGroup) -> Result<()> {
-        ns_call!(self, [user, mnt, net, uts], enter_if, ctx);
+        match &self.user {
+            NSSlot::Provided(ns, _) => {
+                if matches!(ns.source, NSSource::Unavail) {
+                    info!("Enter UserNS by ioctl-ing Net NS");
+                    let usr = self.net.user_ns()?;
+                    setns(&usr, CloneFlags::CLONE_NEWUSER)?;
+                } else {
+                    self.user.enter_if(ctx)?;
+                }
+            }
+            _ => (),
+        }
+
+        ns_call!(self, [mnt, net, uts], enter_if, ctx);
         Ok(())
     }
     fn proc_path(pid: PidPath, alt: Option<NSSource>) -> Result<Self> {
@@ -396,12 +412,16 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
     fn enter_if(&self, ctx: &NSGroup) -> Result<()> {
         match self {
             Self::Absent => Ok(()),
-            Self::Provided(ns, ty) => {
+            Self::Provided(ns, _) => {
                 if K::get(ctx).must()?.unique == ns.unique {
                     Ok(())
                 } else {
-                    log::info!("Enter {:?}, {}", K::NAME, ns);
-                    ns.enter(K::FLAG)
+                    if ns.source == NSSource::Unavail {
+                        Ok(())
+                    } else {
+                        log::info!("Enter {:?}, {}", K::NAME, ns);
+                        ns.enter(K::FLAG)
+                    }
                 }
             }
         }
@@ -424,6 +444,43 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
             },
             Default::default(),
         ))
+    }
+    fn user_ns(&self) -> Result<std::fs::File> {
+        match &self {
+            Self::Absent => unreachable!(),
+            Self::Provided(ns, ty) => match &ns.source {
+                NSSource::Path(p) => {
+                    let f = std::fs::File::open(p)?;
+                    let fu = unsafe {
+                        std::fs::File::from_raw_fd(libc::ioctl(f.as_raw_fd(), NS_GET_USERNS.into()))
+                    };
+                    Ok(fu)
+                }
+                _ => unreachable!(),
+            },
+        }
+    }
+    fn user_ns_slot(&self) -> Result<NSSlot<ExactNS, NSUser>> {
+        match &self {
+            Self::Absent => unreachable!(),
+            Self::Provided(ns, ty) => match &ns.source {
+                NSSource::Path(p) => {
+                    let f = std::fs::File::open(p)?;
+                    let fu = unsafe {
+                        std::fs::File::from_raw_fd(libc::ioctl(f.as_raw_fd(), NS_GET_USERNS.into()))
+                    };
+                    let stat = nix::sys::stat::fstat(fu.as_raw_fd())?;
+                    Ok(NSSlot::Provided(
+                        ExactNS {
+                            source: NSSource::Unavail,
+                            unique: stat.into(),
+                        },
+                        Default::default(),
+                    ))
+                }
+                _ => unreachable!(),
+            },
+        }
     }
 }
 
@@ -501,7 +558,7 @@ struct Graphs {
     map: HashMap<UniqueFile, NodeI>,
     name: BiMap<String, NodeI>,
     #[serde(skip)]
-    file: Option<std::fs::File>
+    file: Option<std::fs::File>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -518,6 +575,13 @@ pub enum NSAdd {
     RecordMountedPaths,
     RecordProcfsPaths,
     RecordNothing,
+    Flatpak,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NSAddRes {
+    NewNS,
+    Found,
 }
 
 #[public]
@@ -530,13 +594,15 @@ impl Graphs {
         paths: &PathState,
         usermnt: Option<&NSGroup>,
         method: NSAdd,
-    ) -> Result<NodeI> {
+        name: Option<String>,
+    ) -> Result<(NSAddRes, NodeI)> {
         let ns = NSGroup::key_ident(pid)?;
         let uf = ns.unique;
         match self.map.entry(uf) {
             hash_map::Entry::Occupied(en) => {
+                let ns = *en.get();
                 log::info!("NS object {pid:?} exists");
-                Ok(*en.get())
+                Ok((NSAddRes::Found, ns))
             }
             hash_map::Entry::Vacant(va) => {
                 log::info!("New NS object {pid:?}");
@@ -549,15 +615,23 @@ impl Graphs {
                     }
                     NSAdd::RecordProcfsPaths => NSGroup::proc_path(pid.to_n(), None)?,
                     NSAdd::RecordNothing => NSGroup::proc_path(pid, Some(NSSource::Unavail))?,
+                    NSAdd::Flatpak => {
+                        let mut g = NSGroup::default();
+                        // Prevents entering by setting to unavail
+                        assign!(g, [pid, mnt], proc_path, pid, Some(NSSource::Unavail));
+                        assign!(g, [net, uts], proc_path, pid, None);
+                        g.user = g.net.user_ns_slot()?;
+                        g
+                    }
                 };
                 if let Some(p) = usermnt {
                     node += p;
                 }
-                self.data[ix].replace(ObjectNode {
-                    name: None,
-                    main: node,
-                });
-                Ok(*va.insert(ix))
+                if let Some(ref na) = name {
+                    self.name.insert(na.clone(), ix);
+                }
+                self.data[ix].replace(ObjectNode { name, main: node });
+                Ok((NSAddRes::NewNS, *va.insert(ix)))
             }
         }
     }

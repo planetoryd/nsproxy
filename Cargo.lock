@@ -1708,6 +1708,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4cd1a83af159aa67994778be9070f0ae1bd732942279cabb14f86f986a21456"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ab96045f1fabcc9fe043d9cb6900c5e1cba5c13f6aaa3d2295b496661924464"
+
+[[package]]
 name = "lock_api"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2020,6 +2026,7 @@ dependencies = [
  "ipnetwork 0.20.0",
  "libc",
  "libsystemd",
+ "linux-raw-sys 0.6.3",
  "log",
  "netlink-ops",
  "nix 0.27.1",

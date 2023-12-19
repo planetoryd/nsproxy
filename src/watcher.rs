@@ -35,7 +35,7 @@ impl FEvent {
 impl FlatpakWatcher {
     pub async fn daemon(mut self, uid: u32, sx: Sender<FEvent>) -> Result<()> {
         let flatpak_dir = PathBuf::from(format!("/run/user/{}/.flatpak/", uid));
-        let mut inoti = inotify::Inotify::init()?;
+        let inoti = inotify::Inotify::init()?;
         inoti
             .watches()
             .add(&flatpak_dir, WatchMask::CLOSE_NOWRITE)?;

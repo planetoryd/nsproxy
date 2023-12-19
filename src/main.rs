@@ -27,8 +27,8 @@ use nix::sched::{setns, unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{fork, getgid, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
 use nsproxy::data::{
-    FDRecver, Graphs, NSAdd, NSGroup, NSSlot, NSState, NodeAddr, NodeI, ObjectNode, PassFD,
-    Relation, Validate, ValidateR, TUNC,
+    FDRecver, Graphs, NSAdd, NSAddRes, NSGroup, NSSlot, NSState, NodeAddr, NodeI, ObjectNode,
+    PassFD, Relation, Validate, ValidateR, TUNC,
 };
 use nsproxy::flatpak::FlatpakID;
 use nsproxy::managed::{
@@ -263,8 +263,8 @@ fn main() -> Result<()> {
             let (mut sp, mut sc) = UnixStream::pair()?;
             let mut buf = [0; 1];
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
-            let src = if let Some(pid) = pid {
-                graphs.add_ns(PidPath::N(pid), &paths, uns.as_ref(), ns_add)?
+            let (r, src) = if let Some(pid) = pid {
+                graphs.add_ns(PidPath::N(pid), &paths, uns.as_ref(), ns_add, name)?
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
@@ -303,20 +303,20 @@ fn main() -> Result<()> {
                             uns.as_ref(),
                             // We have no privs to mount with when new_userns==true
                             ns_add,
+                            name,
                         )?;
                         sp.write_all(&[1])?;
                         k
                     }
                 }
             }; // Source of TUNFD/SocketFD
-            if let Some(na) = name {
-                graphs.name.insert(na, src);
-            }
-            let out = graphs.add_ns(
+            assert_eq!(r, NSAddRes::NewNS);
+            let (_, out) = graphs.add_ns(
                 PidPath::Selfproc,
                 &paths,
                 uns.as_ref(),
                 NSAdd::RecordNothing,
+                None,
             )?;
             // dbg!(&graphs.data.node_indices().collect::<Vec<_>>());
             let edge = graphs.data.add_edge(src, out, None);
@@ -421,10 +421,11 @@ fn main() -> Result<()> {
                 aok!()
             })?;
         }
-        Commands::Watch { path, dryrun } => {
+        Commands::Watch { mut path, dryrun } => {
             let uid = what_uid(None, false)?;
             let mut fpwatch = FlatpakWatcher::default();
             let fpath = paths.flatpak();
+            path = path.canonicalize()?;
             if !fpath.exists() {
                 tracing::error!("You must specify a list of apps to proxy at {:?}", &fpath);
                 return Ok(());
@@ -450,15 +451,24 @@ fn main() -> Result<()> {
                             continue;
                         }
                         let mut graphs = Graphs::load_file(&paths)?;
-                        let src = graphs.add_ns(
+                        let (_, out) = graphs.add_ns(
+                            PidPath::Selfproc,
+                            &paths,
+                            None,
+                            NSAdd::RecordNothing,
+                            None,
+                        )?;
+                        let (r, src) = graphs.add_ns(
                             PidPath::N(fe.pid.try_into()?),
                             &paths,
                             None,
-                            NSAdd::RecordProcfsPaths,
+                            NSAdd::Flatpak,
+                            Some(fe.name()),
                         )?;
-                        graphs.name.insert(fe.name(), src);
-                        let out =
-                            graphs.add_ns(PidPath::Selfproc, &paths, None, NSAdd::RecordNothing)?;
+                        if matches!(r, NSAddRes::Found) {
+                            log::warn!("Skipping, Net NS exists in state file");
+                            continue;
+                        }
                         let edge = graphs.data.add_edge(src, out, None);
                         log::info!(
                             "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",

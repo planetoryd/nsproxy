@@ -34,14 +34,7 @@ derivative = "2.2.0"
 fully_pub = "0.1.4"
 libc = "0.2.149"
 log = "0.4.20"
-nix = { version = "0.27.1", features = [
-    "sched",
-    "net",
-    "mount",
-    "env",
-    "hostname",
-    "user",
-] }
+nix = { version = "0.27.1", features = ["sched", "net", "mount", "env", "hostname", "user", "ioctl"] }
 passfd = "0.1.6"
 rust-ini = "0.20.0"
 serde = { version = "1.0.190", features = ["derive"] }
@@ -75,6 +68,7 @@ inotify = "0.10.2"
 futures = "0.3.29"
 procfs = "0.16.0"
 fs4 = "0.7.0"
+linux-raw-sys = { version = "0.6.3", features = ["ioctl"] }
 # daemonize-me = "2.0.1"
 
 [build-dependencies]
