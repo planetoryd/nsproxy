@@ -20,9 +20,14 @@ edition = "2021"
 build = "build.rs"
 
 [profile.release]
-strip = true
-opt-level = "z" # bottleneck is size, not cpu
+strip = false
+opt-level = 1
 lto = true
+# Just strip manually
+
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/clang"
+rustflags = ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=-Wl,--no-rosegment"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

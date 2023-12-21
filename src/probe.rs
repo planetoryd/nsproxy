@@ -41,9 +41,13 @@ impl PassFD<TUNC> {
             conf.name(na);
         }
         let mut dev = tun::create(&conf)?;
+        if let Some(mtu) = &self.creation.mtu.or(Some(DEFAULT_MTU)) {
+            dev.set_mtu((*mtu).try_into().unwrap())?;
+        }
         dev.enabled(true)?;
         dev.set_nonblock()?;
         dev.persist()?;
+
         assert!(dev.has_packet_information());
         self.connect_and_pass(&dev)?;
         Ok(())

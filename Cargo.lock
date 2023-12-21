@@ -3318,6 +3318,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bincode",
+ "bytes",
  "clap",
  "ctrlc2",
  "digest_auth",

@@ -95,6 +95,7 @@ impl Display for SocketC {
 struct TUNC {
     layer: Layer,
     name: Option<String>,
+    mtu: Option<u32>,
 }
 
 impl Display for TUNC {
@@ -207,43 +208,6 @@ impl<'n> NSState<'n> {
         Ok(())
     }
 }
-
-impl Validate for NSGroup {
-    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup) -> Result<ValidateR> {
-        match &self.user {
-            NSSlot::Absent => {
-                unreachable!()
-            }
-            NSSlot::Provided(un, _) => match &un.source {
-                NSSource::Pid(p) => {
-                    if ctx.pid.must()?.unique == self.pid.must()?.unique {
-                        validate!(self, cache, ctx, [net, uts]);
-                    } else {
-                        validate!(self, cache, ctx, [user, mnt]);
-                    }
-                    Ok(ValidateR::Pass)
-                }
-                NSSource::Path(p) => {
-                    if ctx.mnt.must()?.unique == self.mnt.must()?.unique {
-                        validate!(self, cache, ctx, [net, pid, uts]);
-                    } else {
-                        validate!(self, cache, ctx, [user, mnt]);
-                    }
-                    Ok(ValidateR::Pass)
-                }
-                NSSource::Unavail => {
-                    if ctx.mnt.must()?.unique == self.mnt.must()?.unique {
-                        validate!(self, cache, ctx, [net, pid, uts]);
-                    } else {
-                        validate!(self, cache, ctx, [user, mnt]);
-                    }
-                    Ok(ValidateR::Pass)
-                }
-            },
-        }
-    }
-}
-
 impl Display for NSGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         wns!(f, self, user, mnt, net, uts, pid);
@@ -386,13 +350,25 @@ impl Validate for ExactNS {
         match &self.source {
             NSSource::Path(p) => {
                 // It's stating right here, which may be not the right place.
-                let st = cached_stat(cache, (p, &ctx.mnt.must()?.unique))?;
-                self.unique.validate(st)?;
+                match &ctx.mnt {
+                    NSSlot::Provided(m, _) => {
+                        if m.unique == self.unique || p.starts_with("/proc/") {
+                            let st = cached_stat(cache, (p, &ctx.mnt.must()?.unique))?;
+                            self.unique.validate(st)?;
+                        }
+                    }
+                    _ => return Ok(ValidateR::Impossible),
+                }
             }
-            NSSource::Pid(p) => {
-                let st = cached_fstat(cache, (*p, &ctx.pid.must()?.unique))?;
-                self.unique.validate(st)?;
-            }
+            NSSource::Pid(p) => match &ctx.pid {
+                NSSlot::Provided(m, _) => {
+                    if m.unique == self.unique {
+                        let st = cached_fstat(cache, (*p, &ctx.pid.must()?.unique))?;
+                        self.unique.validate(st)?;
+                    }
+                }
+                _ => return Ok(ValidateR::Impossible),
+            },
             NSSource::Unavail => return Ok(ValidateR::Unspec),
         }
         Ok(ValidateR::Pass)
@@ -601,12 +577,12 @@ impl Graphs {
         match self.map.entry(uf) {
             hash_map::Entry::Occupied(en) => {
                 let ns = *en.get();
-                log::info!("NS object {pid:?} exists");
+                log::info!("NS object {pid:?} {:?} exists", ns);
                 Ok((NSAddRes::Found, ns))
             }
             hash_map::Entry::Vacant(va) => {
-                log::info!("New NS object {pid:?}");
                 let ix: NodeI = self.data.add_node(None);
+                log::info!("New NS object {pid:?}, {:?}", ix);
                 let mut node = match method {
                     NSAdd::RecordMountedPaths => {
                         // Always try unmount

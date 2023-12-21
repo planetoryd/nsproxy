@@ -144,16 +144,20 @@ impl<'b> UnitName for Socks2TUN<'b> {
 #[public]
 impl Graphs {
     /// Writes to the OS
-    async fn write_probes<'g: 'n + 'd, 'n, 'd, S: ServiceM>(&'g self, serv: &'g S) -> Result<()>
+    async fn write_probes<'g: 'n + 'd, 'n, 'd, S: ServiceM, P: Clone>(
+        &'g self,
+        serv: &'g S,
+        param: P,
+    ) -> Result<()>
     where
-        NodeWDeps<'n, 'd>: ItemCreate<Param = (), Serv = S>,
+        NodeWDeps<'n, 'd>: ItemCreate<Param = P, Serv = S>,
     {
         let data = &self.data;
         for (id, _on) in data.node_references() {
             // Each node is the an NS where probe enters
             let wdeps: NodeWDeps = self.nodewdeps(id)?;
             // Write the probe unit with Requires
-            wdeps.write((), serv).await?;
+            wdeps.write(param.clone(), serv).await?;
             // Override all the configs each time we execute a graph
             // This only concerns the probe services. The dependencies, daemons, and other user specified units are added as dependency.
         }

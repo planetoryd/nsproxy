@@ -33,12 +33,16 @@ impl Graphs {
         let mut remove = Vec::new();
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
-                let rx = k.main.validate(va, &ctx);
+                let rx = k.main.net.validate(va, &ctx);
                 if let Err(er) = rx {
                     let expected = er.downcast::<ValidationErr>()?;
-                    log::info!("Removing NS node {} for {}", k.main.key(), expected);
-                    self.map.remove(&k.main.key());
-                    remove.push(ni);
+                    if !matches!(expected, ValidationErr::Permission) {
+                        log::info!("Removing NS node {} for {}", k.main.key(), expected);
+                        self.map.remove(&k.main.key());
+                        remove.push(ni);
+                    }
+                } else {
+                    log::info!("{:?} Net NS, {:?}", ni, rx.unwrap())
                 }
             } else {
                 remove.push(ni);
@@ -65,6 +69,7 @@ impl Graphs {
             Self::load(&st)
         } else {
             let f = std::fs::File::create(&gp)?;
+            assert!(gp.exists());
             f.try_lock_exclusive()
                 .map_err(|_| anyhow!("State file locked"))?;
             Ok(Graphs {

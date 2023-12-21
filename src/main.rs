@@ -3,6 +3,7 @@
 #![feature(array_try_map)]
 
 use std::collections::HashSet;
+use std::env::var;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
@@ -85,6 +86,8 @@ enum Commands {
         /// Create a new user NS, instead of using an existing one.
         #[arg(long)]
         new_userns: bool,
+        #[arg(long, short, value_parser=parse_node)]
+        out: Option<NodeAddr>,
     },
     /// Start as watcher daemon. This uses the socks2tun method.
     Watch {
@@ -135,6 +138,8 @@ enum Commands {
         uid: Option<u32>,
         /// Command to run
         cmd: Option<String>,
+        #[arg(long, short)]
+        tun2proxy: Option<PathBuf>,
     },
     Setns {
         pid: u32,
@@ -142,6 +147,7 @@ enum Commands {
         #[arg(long, short)]
         uid: Option<u32>,
     },
+    Sync,
 }
 
 fn parse_node(addr: &str) -> Result<NodeAddr> {
@@ -165,6 +171,7 @@ enum NodeOps {
         uid: Option<u32>,
     },
     Reboot,
+    Prune
 }
 
 fn main() -> Result<()> {
@@ -178,7 +185,12 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     let cli = Cli::parse();
-    let paths: Paths = PathState::default()?.into();
+    let paths: Paths = if let Ok(p) = var("PathState") {
+        let pb: PathBuf = p.parse()?;
+        PathState::load_file(&pb)?.into()
+    } else {
+        PathState::default()?.into()
+    };
 
     // We must use a one thread runtime to not mess up NS.
 
@@ -190,6 +202,7 @@ fn main() -> Result<()> {
             uid,
             name,
             new_userns,
+            out,
         } => {
             let mut graphs = Graphs::load_file(&paths)?;
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -276,6 +289,7 @@ fn main() -> Result<()> {
                         } else {
                             enable_ping_all()?;
                         }
+
                         sc.read_exact(&mut buf)?;
                         let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!(
                             "--cmd must be specified when --pid is not provided"
@@ -311,32 +325,41 @@ fn main() -> Result<()> {
                 }
             }; // Source of TUNFD/SocketFD
             assert_eq!(r, NSAddRes::NewNS);
-            let (_, out) = graphs.add_ns(
-                PidPath::Selfproc,
-                &paths,
-                uns.as_ref(),
-                NSAdd::RecordNothing,
-                None,
-            )?;
-            // dbg!(&graphs.data.node_indices().collect::<Vec<_>>());
-            let edge = graphs.data.add_edge(src, out, None);
-            log::info!(
-                "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
-                graphs.data[src].as_ref().unwrap().main.key()
-            );
+
             rt.block_on(async move {
+                let (out_ix, edge) = if let Some(out) = &out {
+                    let out = graphs.resolve(out)?;
+                    (out, graphs.data.add_edge(src, out, None))
+                } else {
+                    let (_, out) = graphs.add_ns(
+                        PidPath::Selfproc,
+                        &paths,
+                        uns.as_ref(),
+                        NSAdd::RecordNothing,
+                        None,
+                    )?;
+                    (out, graphs.data.add_edge(src, out, None))
+                };
+
+                log::info!(
+                    "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
+                    graphs.data[src].as_ref().unwrap().main.key()
+                );
+
                 let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                let serv = systemd::Systemd::new(&paths, pre).await?;
+                let serv = systemd::Systemd::new(&paths, pre, false).await?;
                 let ctx = serv.ctx().await?;
                 // TODO: TUN2proxy when TAP
-                let rel = socks2t.write(Layer::L3, &serv).await?;
+                let rel = socks2t.write((Layer::L3, None), &serv).await?;
                 graphs.data[edge].replace(rel);
                 graphs.dump_file(&paths)?;
-                graphs.write_probes(&serv).await?;
+                // graphs.write_probes(&serv).await?;
+                let nw = graphs.nodewdeps(src)?;
+
+                nw.write(None, &serv).await?;
                 serv.reload(&ctx).await?;
-                let (probe, deps) = graphs.nodewdeps(src)?;
-                deps.restart(&serv, &ctx).await?;
-                probe.restart(&serv, &ctx).await?;
+                nw.1.restart(&serv, &ctx).await?;
+                nw.0.restart(&serv, &ctx).await?;
                 graphs.close()?;
                 aok!()
             })?;
@@ -416,14 +439,14 @@ fn main() -> Result<()> {
                 let dev = AsyncDevice::new(dev)?;
 
                 let (sx, rx) = mpsc::channel(1);
-                tun2socks5::main_entry(dev, 1500, true, args, rx, sx).await?;
+                tun2socks5::main_entry(dev, DEFAULT_MTU.try_into()?, true, args, rx, sx).await?;
 
                 aok!()
             })?;
         }
         Commands::Watch { mut path, dryrun } => {
             let uid = what_uid(None, false)?;
-            let mut fpwatch = FlatpakWatcher::default();
+            let fpwatch = FlatpakWatcher::default();
             let fpath = paths.flatpak();
             path = path.canonicalize()?;
             if !fpath.exists() {
@@ -444,7 +467,7 @@ fn main() -> Result<()> {
                 let pre = zbus::Connection::session().await?;
                 let dae = tokio::spawn(fpwatch.daemon(uid, sx));
                 let looper = async move {
-                    let serv = systemd::Systemd::new(&paths, pre).await?;
+                    let serv = systemd::Systemd::new(&paths, pre, false).await?;
                     let ctx = serv.ctx().await?;
                     while let Some(fe) = rx.recv().await {
                         if dryrun {
@@ -475,14 +498,14 @@ fn main() -> Result<()> {
                             graphs.data[src].as_ref().unwrap().main.key()
                         );
                         let socks2t = Socks2TUN::new(&path, edge)?;
-                        let rel = socks2t.write(Layer::L3, &serv).await?;
+                        let rel = socks2t.write((Layer::L3, None), &serv).await?;
                         graphs.data[edge].replace(rel);
                         graphs.dump_file(&paths)?;
-                        graphs.write_probes(&serv).await?;
                         serv.reload(&ctx).await?;
-                        let (probe, deps) = graphs.nodewdeps(src)?;
-                        deps.restart(&serv, &ctx).await?;
-                        probe.restart(&serv, &ctx).await?;
+                        let nw = graphs.nodewdeps(src)?;
+                        nw.write(None, &serv).await?;
+                        nw.1.restart(&serv, &ctx).await?;
+                        nw.0.restart(&serv, &ctx).await?;
 
                         graphs.close()?;
                     }
@@ -537,7 +560,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Node { id, op } => {
-            let graphs = Graphs::load_file(&paths)?;
+            let mut graphs = Graphs::load_file(&paths)?;
             let require_id = || {
                 if let Some(id) = id {
                     graphs.resolve(&id)
@@ -599,12 +622,17 @@ fn main() -> Result<()> {
                             .build()?;
                         rt.block_on(async {
                             let conn = zbus::Connection::session().await?;
-                            let serv = systemd::Systemd::new(&paths, conn).await?;
+                            let serv = systemd::Systemd::new(&paths, conn, false).await?;
                             let ctx = serv.ctx().await?;
                             deps.restart(&serv, &ctx).await?;
                             node.restart(&serv, &ctx).await?;
                             aok!()
                         })?;
+                    },
+                    NodeOps::Prune => {
+                        let mut va = VaCache::default();
+                        graphs.prune(&mut va)?;
+                        graphs.dump_file(&paths)?;
                     }
                 }
             } else {
@@ -629,9 +657,18 @@ fn main() -> Result<()> {
                 Err(e) => println!("graphs not available, {:?}", e),
             }
         }
-        Commands::Veth { mut uid, cmd } => {
+        Commands::Veth {
+            mut uid,
+            cmd,
+            mut tun2proxy,
+        } => {
             // sysctl net.ipv4.ip_forward=1
-            let mut k = [0; 1];
+            let mut graphs = Graphs::load_file(&paths)?;
+            if let Some(ref mut tun2proxy) = tun2proxy {
+                *tun2proxy = tun2proxy.canonicalize()?;
+            }
+            let mut pspath: PathBuf = "./nsproxy.paths".parse()?;
+            paths.dump_file(&pspath)?;
             let (mut sp, mut sc) = UnixStream::pair()?;
             match unsafe { fork() }? {
                 ForkResult::Child => {
@@ -656,6 +693,39 @@ fn main() -> Result<()> {
                         .build()?;
                     rt.block_on(async {
                         let fd = sp.recv_fd()?;
+                        if let Some(tun2proxy) = tun2proxy {
+                            let (_, src) = graphs.add_ns(
+                                PidPath::N(child.as_raw()),
+                                &paths,
+                                None,
+                                NSAdd::RecordProcfsPaths,
+                                None,
+                            )?;
+                            let (_, out) = graphs.add_ns(
+                                PidPath::Selfproc,
+                                &paths,
+                                None,
+                                NSAdd::RecordNothing,
+                                None,
+                            )?;
+                            let edge = graphs.data.add_edge(src, out, None);
+                            let pre = zbus::Connection::system().await?;
+                            let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
+                            let serv = systemd::Systemd::new(&paths, pre, true).await?;
+                            let ctx = serv.ctx().await?;
+                            // TODO: TUN2proxy when TAP
+                            let rel = socks2t.write((Layer::L3, Some(pspath.clone())), &serv).await?;
+                            graphs.data[edge].replace(rel);
+                            graphs.dump_file(&paths)?;
+                            // graphs.write_probes(&serv).await?;
+                            let nw = graphs.nodewdeps(src)?;
+                            nw.write(Some(pspath.clone()), &serv).await?;
+                            serv.reload(&ctx).await?;
+                            nw.1.restart(&serv, &ctx).await?;
+                            nw.0.restart(&serv, &ctx).await?;
+                            graphs.close()?;
+                        }
+
                         let (conn, h, _) =
                             new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
                                 TokioSocket::from_raw_fd(fd)
@@ -727,6 +797,19 @@ fn main() -> Result<()> {
             let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
             cmd.current_dir(cwd);
             cmd.spawn()?.wait()?;
+        }
+        Commands::Sync => {
+            let graphs = Graphs::load_file(&paths)?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                let pre = zbus::Connection::session().await?;
+                let serv = systemd::Systemd::new(&paths, pre, false).await?;
+                // let ctx = serv.ctx().await?;
+                graphs.write_probes(&serv, None).await?;
+                aok!()
+            })?;
         }
         _ => todo!(),
     }

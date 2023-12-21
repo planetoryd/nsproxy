@@ -1,7 +1,8 @@
 use std::{
     fs::{create_dir_all, Permissions},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc, os::unix::fs::PermissionsExt,
+    sync::Arc, io::Read,
 };
 
 use crate::{
@@ -10,12 +11,17 @@ use crate::{
 };
 
 use super::*;
+use anyhow::anyhow;
 use daggy::NodeIndex;
+use fs4::FileExt;
+use serde::{Deserialize, Serialize};
+use serde_json::from_str;
+use tracing::info;
 use xdg;
 
 /// globally shared state to derive paths
 #[public]
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct PathState {
     config: PathBuf,
     binds: PathBuf,
@@ -34,6 +40,30 @@ pub type Paths = Arc<PathState>;
 
 #[public]
 impl PathState {
+    pub fn dump_file(&self, pa: &Path) -> Result<()> {
+        info!("Dump PathState to {:?}", &pa);
+        let file = std::fs::File::create(&pa)?;
+        serde_json::to_writer_pretty(&file, self)?;
+        Ok(())
+    }
+    pub fn load_file(pa: &Path) -> Result<Self> {
+        info!("Load PathState from {:?}", pa);
+        if pa.exists() {
+            let mut file = std::fs::File::open(pa)?;
+            file.try_lock_exclusive()
+                .map_err(|_| anyhow!("State file locked"))?;
+            let mut st = Default::default();
+            file.read_to_string(&mut st)?;
+            let g: Self = from_str(&st)?;
+            Ok(g)
+        } else {
+            let f = std::fs::File::create(&pa)?;
+            assert!(pa.exists());
+            f.try_lock_exclusive()
+                .map_err(|_| anyhow!("State file locked"))?;
+            PathState::default()
+        }
+    }
     fn default() -> Result<Self> {
         let dirs = xdg::BaseDirectories::with_prefix(DIRPREFIX)?;
         let k = Self {

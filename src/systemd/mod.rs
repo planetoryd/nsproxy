@@ -19,8 +19,8 @@ use super::*;
 use crate::{
     data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation},
     managed::{
-        Indexed, ItemAction, ItemCreate, ItemRM, MItem, NodeWDeps, ServiceM, Socks2TUN, NDeps,
-        NodeIndexed, IRelation,
+        IRelation, Indexed, ItemAction, ItemCreate, ItemRM, MItem, NDeps, NodeIndexed, NodeWDeps,
+        ServiceM, Socks2TUN,
     },
     paths::PathState,
 };
@@ -36,12 +36,12 @@ pub struct Systemd {
 }
 
 impl<'b> MItem for Socks2TUN<'b> {
-    type Param = Layer;
+    type Param = (Layer, Option<PathBuf>);
     type Serv = Systemd;
 }
 
 impl<'n, 'd> MItem for NodeWDeps<'n, 'd> {
-    type Param = ();
+    type Param = Option<PathBuf>;
     type Serv = Systemd;
 }
 
@@ -158,7 +158,11 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
             };
             let unit: String = match rec {
                 FDRecver::Systemd(unit_name) => unit_name.clone(),
-                FDRecver::TUN2Proxy(confpath) => Socks2TUN { confpath, ix: edge.id }.service()?,
+                FDRecver::TUN2Proxy(confpath) => Socks2TUN {
+                    confpath,
+                    ix: edge.id,
+                }
+                .service()?,
                 FDRecver::DontCare => continue,
             };
             deps.push(unit);
@@ -170,8 +174,8 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
             .set("Description", format!("Probe in {:?}", place.id))
             .set("Requires", &deplist)
             .set("After", &deplist);
-        service
-            .with_section(Some("Service"))
+        let mut servsec = service.with_section(Some("Service"));
+        let sec = servsec
             .set(
                 "ExecStart",
                 format!("{:?} probe {:?}", &serv.self_path, &place.id.index()),
@@ -181,6 +185,10 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
             .set("StandardOutput", "journal")
             .set("StandardError", "journal")
             .set("Environment", "RUST_BACKTRACE=1");
+        if let Some(p) = param {
+            let p = p.canonicalize()?;
+            sec.set("Environment", format!("PathState={:?}", p));
+        }
         let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
         log::info!(
@@ -217,22 +225,28 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
             .set("Requires", &selfsock)
             .set("After", &selfsock);
         assert!(self.confpath.exists());
-        service
-            .with_section(Some("Service"))
+        let mut servsec = service.with_section(Some("Service"));
+        let sec = servsec
             .set(
                 "ExecStart",
                 format!("{:?} tun2proxy {:?}", &serv.self_path, &self.confpath),
             )
             .set("Environment", "RUST_LOG=trace")
             .set("Environment", "RUST_BACKTRACE=1");
+        if let Some(p) = param.1 {
+            let p = p.canonicalize()?;
+            sec.set("Environment", format!("PathState={:?}", p));
+        }
+
         let servname = self.service()?;
         let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
         log::info!("Wrote Tun2proxy unit to {:?}", &servpath);
         Ok(Relation::SendTUN(PassFD {
             creation: data::TUNC {
-                layer: param,
+                layer: param.0,
                 name: Some(PROBE_TUN.to_owned()),
+                mtu: None,
             },
             receiver: data::FDRecver::TUN2Proxy(self.confpath.to_owned()),
             listener: sfile,
@@ -267,11 +281,15 @@ impl<'b> ItemRM for Socks2TUN<'b> {
 
 #[public]
 impl Systemd {
-    async fn new(paths: &PathState, conn: impl Into<zbus::Connection>) -> Result<Self> {
+    async fn new(paths: &PathState, conn: impl Into<zbus::Connection>, root: bool) -> Result<Self> {
         let path = paths.tun2proxy();
         create_dir_all(&path)?;
         let base = directories::BaseDirs::new().unwrap();
-        let systemd_unit = base.config_local_dir().join("systemd/user");
+        let systemd_unit = if root {
+            "/etc/systemd/system".parse()?
+        } else {
+            base.config_local_dir().join("systemd/user")
+        };
         create_dir_all(&systemd_unit)?;
         Ok(Self {
             systemd_unit,

@@ -188,6 +188,7 @@ pub enum ValidationErr {
     InoMismatch,
     FileNonExist,
     ProcessGone,
+    Permission
 }
 
 #[derive(Serialize, Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -308,6 +309,7 @@ pub fn cached_stat<'k>(ca: &'k mut VaCache, path: NMnt) -> Result<&'k stat> {
         if let Err(ref e) = st {
             match e {
                 Errno::ENOENT => Err(ValidationErr::FileNonExist.into()),
+                Errno::EPERM | Errno::EACCES => Err(ValidationErr::Permission.into()),
                 _ => Err(st.unwrap_err().into()),
             }
         } else {
