@@ -3,12 +3,16 @@
 use std::{
     collections::HashMap,
     env::var,
+    ffi::{CStr, CString},
     fs::{
         create_dir, create_dir_all, read_dir, remove_dir_all, remove_file, File, FileType,
         OpenOptions,
     },
     io::{BufRead, BufReader, Read, Write},
-    os::{fd::AsRawFd, unix::net::UnixStream},
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, net::UnixStream},
+    },
     path::PathBuf,
     process::exit,
     sync::mpsc::sync_channel,
@@ -17,6 +21,7 @@ use std::{
 use anyhow::{bail, ensure};
 use daggy::NodeIndex;
 use libc::{pid_t, stat, syscall, uid_t};
+use tracing::info;
 
 use super::*;
 use crate::{
@@ -29,7 +34,8 @@ use nix::{
     sched::{setns, unshare, CloneFlags},
     sys::{signal::kill, stat::fstat, wait::waitpid},
     unistd::{
-        fork, getresuid, getuid, seteuid, setresgid, setresuid, setuid, ForkResult, Gid, Pid, Uid,
+        fork, getresuid, getuid, initgroups, seteuid, setgroups, setresgid, setresuid, setuid,
+        ForkResult, Gid, Pid, Uid,
     },
 };
 
@@ -466,6 +472,11 @@ pub fn enable_ping_gid(gid: Gid) -> Result<()> {
 
 pub fn cmd_uid(uid: Option<u32>, allow_root: bool) -> Result<()> {
     let u = Uid::from_raw(what_uid(uid, allow_root)?);
+    let user = uzers::get_user_by_uid(u.as_raw()).unwrap();
+    let g = user.primary_group_id().into();
+    info!("set initgroups");
+    initgroups(&CString::new(user.name().as_bytes())?, g)?;
+    setresgid(g, g, g)?;
     setresuid(u, u, u)?;
     Ok(())
 }

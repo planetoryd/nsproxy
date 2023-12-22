@@ -4,10 +4,12 @@
 
 use std::collections::HashSet;
 use std::env::var;
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{exit, Command, Stdio};
 use std::{fs::File, io::Read, os::fd::AsFd, path::PathBuf};
 
@@ -148,6 +150,14 @@ enum Commands {
         uid: Option<u32>,
     },
     Sync,
+    /// Install nsproxy to your system. 
+    Install {
+        #[arg(long, short)]
+        sproxy: bool,
+        #[arg(long, short)]
+        dstdir: Option<PathBuf>,
+    },
+    Noop
 }
 
 fn parse_node(addr: &str) -> Result<NodeAddr> {
@@ -171,10 +181,18 @@ enum NodeOps {
         uid: Option<u32>,
     },
     Reboot,
-    Prune
+    Prune,
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Noop => {
+            exit(0)
+        },
+        _ => ()
+    }
+
     let subscriber = FmtSubscriber::builder()
         .compact()
         .with_max_level(Level::INFO)
@@ -183,8 +201,7 @@ fn main() -> Result<()> {
     LogTracer::init()?;
     info!("SHA1: {}", env!("VERGEN_GIT_SHA"));
     let cwd = std::env::current_dir()?;
-
-    let cli = Cli::parse();
+    
     let paths: Paths = if let Ok(p) = var("PathState") {
         let pb: PathBuf = p.parse()?;
         PathState::load_file(&pb)?.into()
@@ -628,7 +645,7 @@ fn main() -> Result<()> {
                             node.restart(&serv, &ctx).await?;
                             aok!()
                         })?;
-                    },
+                    }
                     NodeOps::Prune => {
                         let mut va = VaCache::default();
                         graphs.prune(&mut va)?;
@@ -714,7 +731,9 @@ fn main() -> Result<()> {
                             let serv = systemd::Systemd::new(&paths, pre, true).await?;
                             let ctx = serv.ctx().await?;
                             // TODO: TUN2proxy when TAP
-                            let rel = socks2t.write((Layer::L3, Some(pspath.clone())), &serv).await?;
+                            let rel = socks2t
+                                .write((Layer::L3, Some(pspath.clone())), &serv)
+                                .await?;
                             graphs.data[edge].replace(rel);
                             graphs.dump_file(&paths)?;
                             // graphs.write_probes(&serv).await?;
@@ -810,6 +829,28 @@ fn main() -> Result<()> {
                 graphs.write_probes(&serv, None).await?;
                 aok!()
             })?;
+        }
+        Commands::Install { sproxy, dstdir } => {
+            let selfprog = std::env::current_exe()?;
+            let mut sproxyf = selfprog.clone();
+            let dstdir: PathBuf = dstdir.unwrap_or("/usr/local/bin".parse()?);
+            sproxyf.set_file_name("sproxy");
+            let overwrite = |src: &Path, path: &Path| {
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
+                std::fs::copy(src, path)?;
+                aok!()
+            };
+            let selfprogdst = dstdir.join(selfprog.file_name().unwrap());
+            overwrite(&selfprog, &selfprogdst)?;
+            if sproxy {
+                let fd = dstdir.join(sproxyf.file_name().unwrap());
+                overwrite(&sproxyf, &fd)?;
+                let f = std::fs::File::open(&fd)?;
+                let perms = Permissions::from_mode(0o6755);
+                f.set_permissions(perms)?;
+            }
         }
         _ => todo!(),
     }
