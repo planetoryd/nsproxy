@@ -18,11 +18,16 @@ sproxy node <index> run # enter that container from another shell
 ## Rationale
 
 - Firefox and its derivatives, leak traffic even with SOCKS5 proxy configured
-    - Browsers in general have a lot of telemetry, which is unacceptable for what this project is trying to do.
+    - Most browsers, Firefox, Floorp (false advertised malware), and even Librewolf, caused my firewall to pop up when I opened it.
+        - which by my OPSEC standard is unacceptable.
 - Proxychains may silently fail and leak traffic (but it's a great tool if you put it in a netns which nullfies the downsides)
+    - because it avoids the roundtrip of TUN and make the app connect to SOCKS5 endpoint directly
 - Nsproxy creates containers which better suits the OPSEC use case than [sing-box](https://github.com/SagerNet/sing-box)
 - [Tun2socks](https://github.com/xjasonlyu/tun2socks) does not have virtual DNS
 - VPNs (in the sense the binaries VPN vendors distribute) do not care about the OPSEC usecase. 
+- Portmaster does not handle the use case this tool is concerning. 
+    - I find it dishonest because its per-app-vpn feature only works with *their* VPNs
+- Opensnitch does not have the `redirect/restrict programs to certain net interfaces, addresses (of socks5)` feature.
 
 ## The usecase
 
@@ -34,8 +39,22 @@ sproxy node <index> run # enter that container from another shell
 
 ## We've got you covered
 
+Root or not
+
+- `sproxy` requires root but less trouble
+    - connects the container to your root/initial netns through veth (max performance)
+    - `sproxy` is just a wrapper that starts `nsproxy` and can be made SUID.
+- `nsproxy init`
+    - initialises a user ns. This is a one-time operation, it just mounts them
+    - It's possible to not mount the NS and have a long-running process, but it's not implemented
+- `nsproxy socks2tun --new-userns`
+    - requires no root, throughout the whole process.
+
 The proxy 
 
+- The current recommended usage is `sproxy veth`
+    - Provides a TUN for non-socks5-capable programs
+    - Provides a veth to your root net ns to access your proxies
 - If your proxy client is opensourced, it can be made to accept a socket from nsproxy
     - Nsproxy will create a container and you can access the proxy through a SOCKS5 endpoint in the container.
 - If your proxy is opensourced and has custom TUN logic, it can be made to accepet the TUN file descriptor from nsproxy
