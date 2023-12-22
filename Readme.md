@@ -70,6 +70,7 @@ The app
     - Nsproxy may create a TUN and route it to the proxy's SOCKS5 endpoint
 - If your app works with SOCKS5
     - You just connect to the SOCKS5 endpoint in the container
+    - You can use the `veth` method
 
 ## Fix flatpak networking, sideways.
 
@@ -77,3 +78,12 @@ You can run `nsproxy watch ./test_proxy.json` to automatically proxy flatpak app
 
 Currently it's not recommended (bad for anonymity) to have multiple instances of an app because the data could not be segregated, see [the issue](https://github.com/flatpak/flatpak/issues/1170).
 
+## Development
+
+- Netlink manipulation (including Netfilter) libraries in Rust
+- Tun2socks implementation with [ipstack](https://github.com/narrowlink/ipstack)
+    - Virtual DNS included
+    - The original branch used [tun2proxy](https://github.com/blechschmidt/tun2proxy) but the `smoltcp` it uses has bugs which makes it unusable.
+- Rangemap based IP allocation (or suitable object) library
+- Forked PidFd with `impl AsFd for PidFd`
+- Mounting network namespaces, preparing them for use, everything, in Rust.
