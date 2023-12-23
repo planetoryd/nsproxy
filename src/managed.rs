@@ -168,7 +168,7 @@ impl Graphs {
         }
         Ok(())
     }
-    fn nodewdeps(&self, id: NodeI) -> Result<NodeWDeps> {
+    fn nodewdeps<'s: 'a + 'b, 'a, 'b>(&'s self, id: NodeI) -> Result<NodeWDeps<'a, 'b>> {
         let ed = self
             .data
             // A --push FD--> B

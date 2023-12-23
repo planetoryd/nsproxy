@@ -4,20 +4,24 @@
 use std::{
     collections::HashSet,
     env::{current_dir, current_exe},
+    fmt::Debug,
     fs::{create_dir_all, remove_file},
+    io::ErrorKind,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Result, bail};
+use anyhow::{anyhow, bail, Result};
 use daggy::NodeIndex;
+use netlink_ops::netlink::{LinkAB, NLDriver, nl_ctx};
+use nsproxy_common::ExactNS;
 use systemd_zbus::{ManagerProxy, Mode::Replace};
 use tun::Layer;
 use zbus::Address;
 
 use super::*;
 use crate::{
-    data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation},
+    data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation, NSGroup},
     managed::{
         IRelation, Indexed, ItemAction, ItemCreate, ItemRM, MItem, NDeps, NodeIndexed, NodeWDeps,
         ServiceM, Socks2TUN,
@@ -32,8 +36,8 @@ pub struct Systemd {
     tun2proxy_socks: PathBuf,
     systemd_unit: PathBuf,
     self_path: PathBuf,
-    conn: zbus::Connection,
-    root: bool
+    pub conn: Option<zbus::Connection>,
+    root: bool,
 }
 
 impl<'b> MItem for Socks2TUN<'b> {
@@ -61,18 +65,31 @@ impl<'k> MItem for NDeps<'k> {
 
 impl<'k> ItemRM for NodeIndexed<'k> {
     async fn remove(&self, serv: &Self::Serv) -> Result<()> {
-        remove_file(serv.systemd_unit.join(self.service()?))?;
+        remove_file_lenient(&serv.systemd_unit.join(self.service()?))?;
         Ok(())
+    }
+}
+
+pub fn remove_file_lenient(path: impl AsRef<Path> + Debug) -> Result<()> {
+    match remove_file(&path) {
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                log::warn!("File {:?} not found", path);
+                Ok(())
+            } else {
+                Err(err.into())
+            }
+        }
+        _ => Ok(()),
     }
 }
 
 pub fn match_root(serv: &Systemd, root: bool) -> Result<()> {
     if serv.root != root {
-        bail!("Can not manipulate systemd because you are running as {}", if serv.root {
-            "root"
-        } else {
-            "not root"
-        })
+        bail!(
+            "Can not manipulate systemd because you are running as {}",
+            if serv.root { "root" } else { "not root" }
+        )
     }
     Ok(())
 }
@@ -88,11 +105,7 @@ impl<'k> ItemAction for NodeIndexed<'k> {
         ctx.restart_unit(&n, Replace).await?;
         Ok(())
     }
-    async fn stop(
-        &self,
-        serv: &Self::Serv,
-        ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
-    ) -> Result<()> {
+    async fn stop(&self, serv: &Self::Serv, ctx: &<Self::Serv as ServiceM>::Ctx<'_>) -> Result<()> {
         let n = self.service()?;
         log::info!("Stop unit {n}");
         ctx.stop_unit(&n, Replace).await?;
@@ -106,7 +119,7 @@ pub fn units(ve: &NDeps<'_>) -> Result<HashSet<String>> {
         let re = match edge.item {
             Relation::SendSocket(p) => &p.receiver,
             Relation::SendTUN(p) => &p.receiver,
-            _ => continue
+            _ => continue,
         };
         match re {
             FDRecver::Systemd(se) => units.insert(se.to_owned()),
@@ -154,6 +167,33 @@ pub trait UnitName {
 impl<'k> UnitName for NodeIndexed<'k> {
     fn stem(&self) -> Result<String> {
         Ok(format!("probe{}", self.id.index()))
+    }
+}
+
+impl<'n, 'd> ItemRM for NodeWDeps<'n, 'd> {
+    async fn remove(&self, serv: &Self::Serv) -> Result<()> {
+        self.0.remove(serv).await?;
+        for dep in self.1.iter() {
+            match &dep.edge.item {
+                Relation::Veth(ve) => {
+                    // Nothing needs to be done.
+                    // If there is no process in an NS, it gets removed, and the veths get removed too
+                }
+                edge => {
+                    if let Some(fdr) = edge.fd_recver() {
+                        match fdr {
+                            FDRecver::TUN2Proxy(path) => {
+                                let socks2 = Socks2TUN::new(path, dep.edge.id)?;
+                                socks2.remove(serv).await?;
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -270,15 +310,15 @@ impl<'b> ItemAction for Socks2TUN<'b> {
 
 impl<'b> ItemRM for Socks2TUN<'b> {
     async fn remove(&self, serv: &Self::Serv) -> Result<()> {
-        remove_file(serv.systemd_unit.join(self.service()?))?;
-        remove_file(serv.systemd_unit.join(self.sockunit()?))?;
+        remove_file_lenient(serv.systemd_unit.join(self.service()?))?;
+        remove_file_lenient(serv.systemd_unit.join(self.sockunit()?))?;
         Ok(())
     }
 }
 
 #[public]
 impl Systemd {
-    async fn new(paths: &PathState, conn: impl Into<zbus::Connection>, root: bool) -> Result<Self> {
+    fn new(paths: &PathState, conn: Option<zbus::Connection>, root: bool) -> Result<Self> {
         let path = paths.tun2proxy();
         create_dir_all(&path)?;
         let base = directories::BaseDirs::new().unwrap();
@@ -292,8 +332,8 @@ impl Systemd {
             systemd_unit,
             tun2proxy_socks: path,
             self_path: current_exe()?,
-            conn: conn.into(),
-            root
+            conn,
+            root,
         })
     }
 }
@@ -301,7 +341,7 @@ impl Systemd {
 impl ServiceM for Systemd {
     type Ctx<'c> = ManagerProxy<'c>;
     async fn ctx<'k>(&'k self) -> Result<Self::Ctx<'k>> {
-        Ok(ManagerProxy::new(&self.conn).await?)
+        Ok(ManagerProxy::new(self.conn.as_ref().unwrap()).await?)
     }
     async fn reload(&self, ctx: &Self::Ctx<'_>) -> Result<()> {
         ctx.reload().await?;

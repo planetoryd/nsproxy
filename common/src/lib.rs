@@ -187,15 +187,16 @@ use thiserror::Error;
 pub enum ValidationErr {
     InoMismatch,
     FileNonExist,
+    FileNonExistProc,
     ProcessGone,
-    Permission
+    Permission,
 }
 
 #[derive(Serialize, Debug, Deserialize, Clone, PartialEq, Eq)]
 pub enum NSSource {
     Pid(pid_t),
     Path(PathBuf),
-    /// Ex. running as an unprivileged process, the root NS can't be stated. 
+    /// Ex. running as an unprivileged process, the root NS can't be stated.
     /// And we don't keep ephemeral proc fs paths either
     /// Treated as path when validating
     /// True for IOCTL-able
@@ -309,7 +310,11 @@ pub fn cached_stat<'k>(ca: &'k mut VaCache, path: NMnt) -> Result<&'k stat> {
         let st = nix::sys::stat::stat::<Path>(k.0.as_path());
         if let Err(ref e) = st {
             match e {
-                Errno::ENOENT => Err(ValidationErr::FileNonExist.into()),
+                Errno::ENOENT => Err(if k.0.starts_with("/proc/") {
+                    ValidationErr::FileNonExistProc.into()
+                } else {
+                    ValidationErr::FileNonExist.into()
+                }),
                 Errno::EPERM | Errno::EACCES => Err(ValidationErr::Permission.into()),
                 _ => Err(st.unwrap_err().into()),
             }

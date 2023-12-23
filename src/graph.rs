@@ -11,6 +11,7 @@ use crate::{
         ExactNS, Graphs, Ix, NSGraph, NSGroup, NodeI, ObjectNode, Relation, Route, RouteNode,
         Validate,
     },
+    managed::{ItemCreate, ItemRM, NodeWDeps},
     paths::{PathState, Paths},
 };
 
@@ -22,20 +23,30 @@ use daggy::{
     Dag,
 };
 use fs4::FileExt;
+use netlink_ops::netlink::{NLDriver, NLHandle};
 use nsproxy_common::{PidPath::Selfproc, VaCache, ValidationErr};
 use petgraph::visit::IntoNodeReferences;
 use serde_json::{from_str, to_string_pretty};
 use tracing::info;
 
 impl Graphs {
-    pub fn prune(&mut self, va: &mut VaCache) -> Result<()> {
+    pub async fn prune<S>(&mut self, va: &mut VaCache, serv: &S) -> Result<()>
+    where
+        for<'a, 'b> NodeWDeps<'a, 'b>: ItemRM<Serv = S>,
+    {
         let ctx = NSGroup::proc_path(Selfproc, None)?;
         let mut remove = Vec::new();
+        // let mut wh = NLDriver::new(NLHandle::new_self_proc_tokio()?);
+        // wh.fill().await?;
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
                 let rx = k.main.net.validate(va, &ctx);
                 if let Err(er) = rx {
                     let expected = er.downcast::<ValidationErr>()?;
+                    if matches!(expected, ValidationErr::FileNonExistProc) {
+                        // TODO: remove it when the NS really disappears
+                        continue;
+                    }
                     if !matches!(expected, ValidationErr::Permission) {
                         log::info!("Removing NS node {} for {}", k.main.key(), expected);
                         self.map.remove(&k.main.key());
@@ -49,6 +60,8 @@ impl Graphs {
             }
         }
         for ni in remove {
+            let nodew = self.nodewdeps(ni)?;
+            nodew.remove(serv).await?;
             self.data.remove_node(ni);
         }
         Ok(())

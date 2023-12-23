@@ -231,9 +231,9 @@ fn main() -> Result<()> {
             let pre = rt.block_on(async { systemd_connection(rootful).await })?;
             let uns;
             let mut va = VaCache::default();
-            graphs.prune(&mut va)?;
+            let mut serv = systemd::Systemd::new(&paths, Some(pre), rootful)?;
+            rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
             let gid = getgid();
-
             match capsys {
                 Ok(_) => {
                     // The user is using SUID or sudo, or we are alredy in a userns, or user did setcap.
@@ -269,7 +269,7 @@ fn main() -> Result<()> {
             } else {
                 NSAdd::RecordMountedPaths
             };
-            graphs.prune(&mut va)?;
+            rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
             let (mut sp, mut sc) = UnixStream::pair()?;
             let mut buf = [0; 1];
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
@@ -346,7 +346,6 @@ fn main() -> Result<()> {
                 );
 
                 let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
                 let ctx = serv.ctx().await?;
                 // TODO: TUN2proxy when TAP
                 let rel = socks2t
@@ -469,7 +468,7 @@ fn main() -> Result<()> {
                 let pre = systemd_connection(rootful).await?;
                 let dae = tokio::spawn(fpwatch.daemon(uid, sx));
                 let looper = async move {
-                    let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
+                    let serv = systemd::Systemd::new(&paths, Some(pre), rootful)?;
                     let ctx = serv.ctx().await?;
                     while let Some(fe) = rx.recv().await {
                         if dryrun {
@@ -650,7 +649,7 @@ fn main() -> Result<()> {
                         rt.block_on(async {
                             let rootful = geteuid().is_root();
                             let pre = systemd_connection(rootful).await?;
-                            let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
+                            let serv = systemd::Systemd::new(&paths, Some(pre), rootful)?;
                             let ctx = serv.ctx().await?;
                             match_root(&serv, node.item.root)?;
                             // A node is root implies deps are located in root systemd directories too
@@ -660,8 +659,13 @@ fn main() -> Result<()> {
                         })?;
                     }
                     NodeOps::Prune => {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
                         let mut va = VaCache::default();
-                        graphs.prune(&mut va)?;
+                        let rootful = geteuid().is_root();
+                        let mut serv = systemd::Systemd::new(&paths, None, rootful)?;
+                        rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
                         graphs.dump_file(&paths)?;
                     }
                 }
@@ -816,7 +820,7 @@ fn main() -> Result<()> {
                             let edge = graphs.data.add_edge(src, out, None);
                             let pre = systemd_connection(rootful).await?;
                             let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                            let serv = systemd::Systemd::new(&paths, pre, true).await?;
+                            let serv = systemd::Systemd::new(&paths, Some(pre), true)?;
                             let ctx = serv.ctx().await?;
                             let rel = socks2t
                                 .write((Layer::L3, Some(pspath.clone())), &serv)
@@ -857,7 +861,7 @@ fn main() -> Result<()> {
             rt.block_on(async {
                 let rootful = geteuid().is_root();
                 let pre = systemd_connection(rootful).await?;
-                let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
+                let serv = systemd::Systemd::new(&paths, Some(pre), rootful)?;
                 // let ctx = serv.ctx().await?;
                 graphs.write_probes(&serv, Some(pspath), rootful).await?;
                 aok!()
