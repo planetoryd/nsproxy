@@ -106,6 +106,7 @@ pub fn units(ve: &NDeps<'_>) -> Result<HashSet<String>> {
         let re = match edge.item {
             Relation::SendSocket(p) => &p.receiver,
             Relation::SendTUN(p) => &p.receiver,
+            _ => continue
         };
         match re {
             FDRecver::Systemd(se) => units.insert(se.to_owned()),
@@ -162,23 +163,7 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
         let place = &self.0;
         let relations = &self.1;
         let servname = place.service()?;
-        let mut deps = Vec::new();
-        for IRelation { edge, .. } in relations.iter() {
-            let rec = match edge.item {
-                Relation::SendTUN(pf) => &pf.receiver,
-                Relation::SendSocket(pf) => &pf.receiver,
-            };
-            let unit: String = match rec {
-                FDRecver::Systemd(unit_name) => unit_name.clone(),
-                FDRecver::TUN2Proxy(confpath) => Socks2TUN {
-                    confpath,
-                    ix: edge.id,
-                }
-                .service()?,
-                FDRecver::DontCare => continue,
-            };
-            deps.push(unit);
-        }
+        let deps = Vec::from_iter(units(relations)?);
         let deplist = deps.join(" ");
         let mut service = ini::Ini::new();
         service

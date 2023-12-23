@@ -18,7 +18,7 @@ use clap::ValueEnum;
 use derivative::Derivative;
 
 use linux_raw_sys::ioctl::NS_GET_USERNS;
-use netlink_ops::errors::ProgrammingError;
+use netlink_ops::{errors::ProgrammingError, netlink::VethConn};
 use nix::sched::{setns, CloneFlags};
 use nsproxy_derive::Validate;
 
@@ -53,8 +53,7 @@ struct RouteNode {
 pub enum Relation {
     SendSocket(PassFD<SocketC>),
     SendTUN(PassFD<TUNC>),
-    // TODO: Veth. The proxy resides in a separate net ns (that may access the outside) in the user ns, apps connect to it with veths.
-    // The proxy starts a TUN, and each app routes to the ns
+    Veth(VethConn),
 }
 
 impl Display for Relation {
@@ -62,16 +61,23 @@ impl Display for Relation {
         match &self {
             Self::SendSocket(p) => f.write_fmt(format_args!("{}", p)),
             Self::SendTUN(p) => f.write_fmt(format_args!("{}", p)),
+            Self::Veth(p) => f.write_fmt(format_args!(
+                "Veth {}, {} in, {} out",
+                p.key.yellow(),
+                p.ip_va.bright_blue(),
+                p.ip_vb.bright_blue()
+            )),
         }
     }
 }
 
 #[public]
 impl Relation {
-    fn fd_recver(&self) -> &FDRecver {
+    fn fd_recver(&self) -> Option<&FDRecver> {
         match self {
-            Relation::SendSocket(p) => &p.receiver,
-            Relation::SendTUN(p) => &p.receiver,
+            Relation::SendSocket(p) => Some(&p.receiver),
+            Relation::SendTUN(p) => Some(&p.receiver),
+            _ => None,
         }
     }
 }

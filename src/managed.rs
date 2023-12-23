@@ -47,21 +47,23 @@ pub struct IRelation<'k> {
 
 impl Display for NodeIndexed<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let idp = NodeIDPrint(self.id, self.item.name.as_ref().map(|k| k.as_str()));
+        let serv = self.service().unwrap();
+        let idp = NodeIDPrint(self.id, self.item.name.as_ref().map(|k| k.as_str()), &serv);
         f.write_fmt(format_args!("{}", idp))?;
         f.write_fmt(format_args!("{}", self.item.main))
     }
 }
 
-pub struct NodeIDPrint<'k>(pub NodeI, pub Option<&'k str>);
+pub struct NodeIDPrint<'k>(pub NodeI, pub Option<&'k str>, pub &'k str);
 
 impl<'k> Display for NodeIDPrint<'k> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("NS Node {} ", self.0.index().bright_yellow()))?;
         match &self.1 {
-            None => f.write_fmt(format_args!("{}\n", "unnamed".bright_black())),
-            Some(n) => f.write_fmt(format_args!("{}\n", n.bright_yellow())),
-        }
+            None => f.write_fmt(format_args!("{}", "unnamed".bright_black())),
+            Some(n) => f.write_fmt(format_args!("{}", n.bright_yellow())),
+        }?;
+        f.write_fmt(format_args!(" {} \n", self.2.bright_purple()))
     }
 }
 

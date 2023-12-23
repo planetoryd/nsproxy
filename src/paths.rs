@@ -42,7 +42,7 @@ pub type Paths = Arc<PathState>;
 #[public]
 impl PathState {
     pub fn dump_file(&self, pa: &Path) -> Result<()> {
-        info!("Dump PathState to {:?}", &pa);
+        // info!("Dump PathState to {:?}", &pa);
         let file = std::fs::File::create(&pa)?;
         serde_json::to_writer_pretty(&file, self)?;
         Ok(())

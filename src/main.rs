@@ -174,9 +174,11 @@ fn parse_node(addr: &str) -> Result<NodeAddr> {
 
 #[derive(Subcommand)]
 enum NodeOps {
-    Logs {
+    Deps {
         #[arg(long, short = 'n', default_value = "30")]
         lines: u32,
+        #[arg(long, short)]
+        index: Option<usize>,
     },
     Run {
         /// Command to run
@@ -381,6 +383,7 @@ fn main() -> Result<()> {
                 match rel.edge.item {
                     Relation::SendSocket(p) => p.pass()?,
                     Relation::SendTUN(p) => p.pass()?,
+                    _ => (),
                 }
             }
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -596,30 +599,46 @@ fn main() -> Result<()> {
                         cmd.current_dir(cwd);
                         cmd.spawn()?.wait()?;
                     }
-                    NodeOps::Logs { lines } => {
+                    NodeOps::Deps { lines, index } => {
                         let ix = require_id()?;
                         let mut cmd = Command::new("journalctl");
                         let (node, deps) = graphs.nodewdeps(ix)?;
                         if deps.len() == 0 {
-                            println!("No dependencies. No logs to show");
+                            println!("No dependencies.");
                         } else {
-                            let serv = match deps[0].edge.item.fd_recver() {
-                                FDRecver::TUN2Proxy(ref path) => {
-                                    Socks2TUN::new(path, deps[0].edge.id)?.service()?
+                            if let Some(index) = index {
+                                let fdrc = deps[index].edge.item.fd_recver();
+                                if let Some(recver) = fdrc {
+                                    let serv = match recver {
+                                        FDRecver::TUN2Proxy(ref path) => {
+                                            Socks2TUN::new(path, deps[0].edge.id)?.service()?
+                                        }
+                                        FDRecver::Systemd(serv) => serv.to_owned(),
+                                        _ => {
+                                            warn!("No dependency known");
+                                            return Ok(());
+                                        }
+                                    };
+                                    cmd.args(
+                                        format!(
+                                            "-n{lines} -o cat --follow -b {}",
+                                            if node.item.root {
+                                                "--unit"
+                                            } else {
+                                                "--user-unit"
+                                            }
+                                        )
+                                        .split(" ")
+                                        .chain([serv.as_str()]),
+                                    );
+                                    let mut ch = cmd.spawn()?;
+                                    ch.wait()?;
+                                } else {
+                                    log::error!("No FD receiver at {}", index)
                                 }
-                                FDRecver::Systemd(serv) => serv.to_owned(),
-                                _ => {
-                                    warn!("No dependency known");
-                                    return Ok(());
-                                }
-                            };
-                            cmd.args(
-                                format!("-n{lines} -o cat --follow -b --user-unit")
-                                    .split(" ")
-                                    .chain([serv.as_str()]),
-                            );
-                            let mut ch = cmd.spawn()?;
-                            ch.wait()?;
+                            } else {
+                                summarize_graph(&graphs)?;
+                            }
                         }
                     }
                     NodeOps::Reboot => {
@@ -705,46 +724,26 @@ fn main() -> Result<()> {
                         let rootful = geteuid().is_root();
                         let fd = sp.recv_fd()?;
                         let mut veth_key: Option<VPairKey> = None;
-                        if let Some(tun2proxy) = tun2proxy {
-                            let (_, src) = graphs.add_ns(
-                                PidPath::N(child.as_raw()),
-                                &paths,
-                                None,
-                                NSAdd::RecordProcfsPaths,
-                                None,
-                                rootful,
-                            )?;
-                            let (_, out) = graphs.add_ns(
-                                PidPath::Selfproc,
-                                &paths,
-                                None,
-                                NSAdd::RecordNothing,
-                                None,
-                                rootful,
-                            )?;
+                        let (_, src) = graphs.add_ns(
+                            PidPath::N(child.as_raw()),
+                            &paths,
+                            None,
+                            NSAdd::RecordProcfsPaths,
+                            None,
+                            rootful,
+                        )?;
+                        let (_, out) = graphs.add_ns(
+                            PidPath::Selfproc,
+                            &paths,
+                            None,
+                            NSAdd::RecordNothing,
+                            None,
+                            rootful,
+                        )?;
+                        if let Some(ref _p) = tun2proxy {
                             veth_key =
                                 Some(format!("v{}to{}", src.index(), out.index()).try_into()?);
-                            let edge = graphs.data.add_edge(src, out, None);
-
-                            let pre = systemd_connection(rootful).await?;
-                            let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                            let serv = systemd::Systemd::new(&paths, pre, true).await?;
-                            let ctx = serv.ctx().await?;
-                            // TODO: TUN2proxy when TAP
-                            let rel = socks2t
-                                .write((Layer::L3, Some(pspath.clone())), &serv)
-                                .await?;
-                            graphs.data[edge].replace(rel);
-                            graphs.dump_file(&paths)?;
-                            // graphs.write_probes(&serv).await?;
-                            let nw = graphs.nodewdeps(src)?;
-                            nw.write(Some(pspath.clone()), &serv).await?;
-                            serv.reload(&ctx).await?;
-                            nw.1.restart(&serv, &ctx).await?;
-                            nw.0.restart(&serv, &ctx).await?;
-                            graphs.close()?;
                         }
-                        sc.write_all(&[0])?;
                         let (conn, h, _) =
                             new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
                                 TokioSocket::from_raw_fd(fd)
@@ -805,12 +804,37 @@ fn main() -> Result<()> {
                             ip6_vb: n6net[1],
                             key: veth_key.unwrap(),
                         };
+                        let edge = graphs.data.add_edge(src, out, None);
                         vc.apply(&mut nl_ch, &mut nl).await?;
                         let mut nl_ch = NLDriver::new(nl_ch.conn);
                         let mut nl = NLDriver::new(nl.conn);
                         nl_ch.fill().await?;
                         nl.fill().await?;
                         vc.apply_addr_up(&mut nl_ch, &mut nl).await?;
+                        graphs.data[edge].replace(Relation::Veth(vc));
+                        if let Some(tun2proxy) = tun2proxy {
+                            let edge = graphs.data.add_edge(src, out, None);
+                            let pre = systemd_connection(rootful).await?;
+                            let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
+                            let serv = systemd::Systemd::new(&paths, pre, true).await?;
+                            let ctx = serv.ctx().await?;
+                            let rel = socks2t
+                                .write((Layer::L3, Some(pspath.clone())), &serv)
+                                .await?;
+                            graphs.data[edge].replace(rel);
+                            graphs.dump_file(&paths)?;
+                            let nw = graphs.nodewdeps(src)?;
+                            nw.write(Some(pspath.clone()), &serv).await?;
+                            serv.reload(&ctx).await?;
+                            nw.1.restart(&serv, &ctx).await?;
+                            nw.0.restart(&serv, &ctx).await?;
+                        } else {
+                            graphs.dump_file(&paths)?;
+                        }
+                        sc.write_all(&[0])?;
+
+                        graphs.close()?;
+
                         aok!()
                     })?;
                     waitpid(Some(Pid::from_raw(-1)), None)?;
@@ -872,7 +896,25 @@ fn summarize_graph(graphs: &Graphs) -> Result<()> {
         print!("{}", nwdeps.0);
         for rel in nwdeps.1.iter() {
             println!("      {}", rel.edge.item);
-            let idp = NodeIDPrint(rel.dst.id, rel.dst.item.name.as_ref().map(|k| k.as_str()));
+            let fdrc = rel.edge.item.fd_recver();
+            if let Some(recver) = fdrc {
+                match recver {
+                    FDRecver::TUN2Proxy(ref path) => {
+                        let serv = Socks2TUN::new(path, rel.edge.id)?.service()?;
+                        println!("      Tun2proxy {}", serv.bright_purple());
+                    }
+                    FDRecver::Systemd(serv) => {
+                        println!("      Service {}", serv.bright_purple());
+                    }
+                    _ => (),
+                };
+            }
+            let serv = rel.dst.service()?;
+            let idp = NodeIDPrint(
+                rel.dst.id,
+                rel.dst.item.name.as_ref().map(|k| k.as_str()),
+                &serv,
+            );
             println!("          => {}", idp);
         }
         if nwdeps.1.len() == 0 {
