@@ -1,1 +1,1 @@
-./target/debug/nsproxy socks2tun -t ./test_proxy.json 
+nsproxy socks2tun -t ./test_proxy.json 

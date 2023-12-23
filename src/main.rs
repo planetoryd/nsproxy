@@ -370,7 +370,6 @@ fn main() -> Result<()> {
                 let rel = socks2t.write((Layer::L3, None), &serv).await?;
                 graphs.data[edge].replace(rel);
                 graphs.dump_file(&paths)?;
-                // graphs.write_probes(&serv).await?;
                 let nw = graphs.nodewdeps(src)?;
 
                 nw.write(None, &serv).await?;
@@ -596,9 +595,13 @@ fn main() -> Result<()> {
                             .ok_or(anyhow!("Specified node does not exist"))?
                             .as_ref() // Second one is an invariant
                             .unwrap();
-                        let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
+                        let mut va = VaCache::default();
+                        let mut nss = NSState {
+                            target: &node.main,
+                            va: &mut va,
+                        };
                         let cwd = std::env::current_dir()?;
-                        node.main.enter(&ctx)?;
+                        nss.validated_enter()?;
                         cmd_uid(uid, true)?;
                         let mut cmd =
                             Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);

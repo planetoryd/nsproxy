@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::{hash_map, HashMap, HashSet},
     default,
-    fmt::Display,
+    fmt::{Display, Write},
     net::SocketAddr,
     ops::AddAssign,
     os::fd::{AsRawFd, FromRawFd},
@@ -34,7 +34,7 @@ pub use nsproxy_common::*;
 #[derive(Serialize, Deserialize, Debug)]
 struct ObjectNode {
     name: Option<String>,
-    main: NSGroup,
+    main: NSGroup<ExactNS>,
 }
 
 #[public]
@@ -163,17 +163,17 @@ pub type EdgeI = EdgeIndex<Ix>;
 #[public]
 #[derive(Derivative, Serialize, Deserialize, Debug)]
 #[derivative(Default(bound = ""))]
-struct NSGroup {
-    mnt: NSSlot<ExactNS, NSMnt>,
-    uts: NSSlot<ExactNS, NSUts>,
-    net: NSSlot<ExactNS, NSNet>,
-    user: NSSlot<ExactNS, NSUser>,
-    pid: NSSlot<ExactNS, NSPid>,
+struct NSGroup<N> {
+    mnt: NSSlot<N, NSMnt>,
+    uts: NSSlot<N, NSUts>,
+    net: NSSlot<N, NSNet>,
+    user: NSSlot<N, NSUser>,
+    pid: NSSlot<N, NSPid>,
 }
 
 #[public]
 struct NSState<'n> {
-    target: &'n NSGroup,
+    target: &'n NSGroup<ExactNS>,
     va: &'n mut VaCache,
 }
 
@@ -181,42 +181,114 @@ impl<'n> NSState<'n> {
     pub fn validated_enter(&mut self) -> Result<()> {
         let cache = &mut self.va;
         let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-
+        let mut val = NSGroup::<[Option<ValidateR>; 2]>::default();
         if ctx.pid.must()?.unique == self.target.pid.must()?.unique {
             if ctx.mnt.must()?.unique == self.target.mnt.must()?.unique {
-                validate!(self.target, cache, &ctx, [user, mnt, net, pid, uts]);
+                val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
             } else {
-                validate!(self.target, cache, &ctx, [user, mnt]);
+                val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-                validate!(self.target, cache, &ctx, [net, pid, uts]);
+                val.validate_all(cache, &ctx, self.target, 1)?;
             }
         } else {
             if ctx.mnt.must()?.unique == self.target.mnt.must()?.unique {
-                validate!(self.target, cache, &ctx, [pid]);
+                val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-                validate!(self.target, cache, &ctx, [user, mnt, net, uts]);
+                val.validate_all(cache, &ctx, self.target, 1)?;
             } else {
-                validate!(self.target, cache, &ctx, [pid, mnt]);
+                val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-                validate!(self.target, cache, &ctx, [user, net, uts]);
+                val.validate_all(cache, &ctx, self.target, 1)?;
             }
         }
+        log::info!("{}", &val);
         Ok(())
     }
 }
-impl Display for NSGroup {
+
+impl<const L: usize> NSGroup<[Option<ValidateR>; L]> {
+    fn validate<S: NSTrait + PartialEq>(
+        &mut self,
+        cache: &mut VaCache,
+        ctx: &NSGroup<ExactNS>,
+        target: &NSGroup<ExactNS>,
+        pos: usize,
+    ) -> Result<()> {
+        let ns = S::get(target);
+        let m = S::get_mut(self);
+        if *m == NSSlot::Absent {
+            *m = NSSlot::Provided([None; L], Default::default());
+        }
+        if let NSSlot::Provided(ref mut vec, _) = m {
+            assert!(vec[pos].is_none());
+            vec[pos] = Some(match ns {
+                NSSlot::Absent => ValidateR::Impossible,
+                NSSlot::Provided(ns, _) => match &ns.source {
+                    NSSource::Path(p) => {
+                        if (S::NAME == "user")
+                            || (target.mnt.map(|m| ctx.mnt.map(|c| m.unique == c.unique))
+                                != (S::NAME == "mnt"))
+                            || p.starts_with("/proc/")
+                        {
+                            ns.validate(cache, ctx)?
+                        } else {
+                            ValidateR::Impossible
+                        }
+                    }
+                    NSSource::Pid(_) => {
+                        if target.pid.map(|m| ctx.pid.map(|c| m.unique == c.unique)) {
+                            ns.validate(cache, ctx)?
+                        } else {
+                            ValidateR::Impossible
+                        }
+                    }
+                    NSSource::Unavail => ValidateR::Unspec,
+                },
+            });
+        }
+        Ok(())
+    }
+    fn validate_all(
+        &mut self,
+        cache: &mut VaCache,
+        ctx: &NSGroup<ExactNS>,
+        target: &NSGroup<ExactNS>,
+        pos: usize,
+    ) -> Result<()> {
+        self.validate::<NSUser>(cache, ctx, target, pos)?;
+        self.validate::<NSMnt>(cache, ctx, target, pos)?;
+        self.validate::<NSNet>(cache, ctx, target, pos)?;
+        self.validate::<NSPid>(cache, ctx, target, pos)?;
+        self.validate::<NSUts>(cache, ctx, target, pos)?;
+        Ok(())
+    }
+}
+
+impl Display for NSGroup<ExactNS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         wns!(f, self, user, mnt, net, uts, pid);
         Ok(())
     }
 }
 
+impl<const NUM: usize> Display for NSGroup<[Option<ValidateR>; NUM]> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("Validation Result \n"))?;
+        wns_val!(f, self, user, mnt, net, uts, pid);
+        Ok(())
+    }
+}
+
 macro wns($f:ident, $s:ident, $($fi:ident),*) {
     $( $f.write_fmt(format_args!("      {} \n", $s.$fi))?;)*
+}
+
+macro wns_val($f:ident, $s:ident, $($fi:ident),*) {
+    $( $f.write_fmt(format_args!("      {:?} \n", $s.$fi))?;)*
 }
 
 pub macro mount_by_pid( $pid:expr,$binds:expr,$group:ident,$v:expr,[$($name:ident),*] ) {
@@ -230,20 +302,21 @@ pub fn mount_ns_by_pid(
     paths: &PathState,
     id: NodeI,
     do_mount: bool,
-) -> Result<NSGroup> {
+) -> Result<NSGroup<ExactNS>> {
     let binds = paths.mount(id)?;
-    let mut nsg: NSGroup = NSGroup::default();
+    let mut nsg: NSGroup<ExactNS> = NSGroup::default();
     mount_by_pid!(pid, &binds, nsg, do_mount, [net, uts, pid]);
     Ok(nsg)
 }
 
 #[public]
-impl NSGroup {
-    fn enter(&self, ctx: &NSGroup) -> Result<()> {
+impl NSGroup<ExactNS> {
+    fn enter(&self, ctx: &NSGroup<ExactNS>) -> Result<()> {
         match &self.user {
             NSSlot::Provided(ns, _) => {
                 if matches!(ns.source, NSSource::Unavail) {
                     info!("Enter UserNS by ioctl-ing Net NS");
+
                     let usr = self.net.user_ns()?;
                     setns(&usr, CloneFlags::CLONE_NEWUSER)?;
                 } else {
@@ -281,7 +354,7 @@ pub macro assign( $group:ident, [$($name:ident),*],  $func:ident, $arg:expr, $ar
     )*
 }
 
-impl AddAssign<&NSGroup> for NSGroup {
+impl AddAssign<&NSGroup<ExactNS>> for NSGroup<ExactNS> {
     /// Assigns with the user&mnt of rhs
     fn add_assign(&mut self, rhs: &Self) {
         if !rhs.user.absent() {
@@ -332,10 +405,10 @@ impl<N: Display, K: NSTrait> Display for NSSlot<N, K> {
 }
 
 pub trait Validate {
-    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup) -> Result<ValidateR>;
+    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup<ExactNS>) -> Result<ValidateR>;
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum ValidateR {
     /// Impossible due to outer circumstances
     Impossible,
@@ -346,29 +419,16 @@ pub enum ValidateR {
 
 impl Validate for ExactNS {
     /// Checking if the ino and dev of the specified file matches the recorded stat
-    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup) -> Result<ValidateR> {
+    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup<ExactNS>) -> Result<ValidateR> {
         match &self.source {
             NSSource::Path(p) => {
-                // It's stating right here, which may be not the right place.
-                match &ctx.mnt {
-                    NSSlot::Provided(m, _) => {
-                        if m.unique == self.unique || p.starts_with("/proc/") {
-                            let st = cached_stat(cache, (p, &ctx.mnt.must()?.unique))?;
-                            self.unique.validate(st)?;
-                        }
-                    }
-                    _ => return Ok(ValidateR::Impossible),
-                }
+                let st = cached_stat(cache, (p, &ctx.mnt.must()?.unique))?;
+                self.unique.validate(st)?;
             }
-            NSSource::Pid(p) => match &ctx.pid {
-                NSSlot::Provided(m, _) => {
-                    if m.unique == self.unique {
-                        let st = cached_fstat(cache, (*p, &ctx.pid.must()?.unique))?;
-                        self.unique.validate(st)?;
-                    }
-                }
-                _ => return Ok(ValidateR::Impossible),
-            },
+            NSSource::Pid(p) => {
+                let st = cached_fstat(cache, (*p, &ctx.pid.must()?.unique))?;
+                self.unique.validate(st)?;
+            }
             NSSource::Unavail => return Ok(ValidateR::Unspec),
         }
         Ok(ValidateR::Pass)
@@ -385,7 +445,7 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
         Ok(())
     }
     /// Enter the NS if provided
-    fn enter_if(&self, ctx: &NSGroup) -> Result<()> {
+    fn enter_if(&self, ctx: &NSGroup<ExactNS>) -> Result<()> {
         match self {
             Self::Absent => Ok(()),
             Self::Provided(ns, _) => {
@@ -404,8 +464,14 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
     }
     fn must(&self) -> Result<&ExactNS> {
         match &self {
-            Self::Absent => unreachable!(),
+            Self::Absent => bail!(Unviable),
             Self::Provided(ns, ty) => Ok(ns),
+        }
+    }
+    fn map<R: Default>(&self, f: impl FnOnce(&ExactNS) -> R) -> R {
+        match &self {
+            Self::Absent => R::default(),
+            Self::Provided(ns, ty) => f(ns),
         }
     }
     fn proc_path(mut pid: PidPath, altsource: Option<NSSource>) -> Result<Self> {
@@ -423,7 +489,7 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
     }
     fn user_ns(&self) -> Result<std::fs::File> {
         match &self {
-            Self::Absent => unreachable!(),
+            Self::Absent => bail!(Unviable),
             Self::Provided(ns, ty) => match &ns.source {
                 NSSource::Path(p) => {
                     let f = std::fs::File::open(p)?;
@@ -432,33 +498,27 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
                     };
                     Ok(fu)
                 }
-                _ => unreachable!(),
+                _ => bail!(Unviable),
             },
         }
     }
     fn user_ns_slot(&self) -> Result<NSSlot<ExactNS, NSUser>> {
-        match &self {
-            Self::Absent => unreachable!(),
-            Self::Provided(ns, ty) => match &ns.source {
-                NSSource::Path(p) => {
-                    let f = std::fs::File::open(p)?;
-                    let fu = unsafe {
-                        std::fs::File::from_raw_fd(libc::ioctl(f.as_raw_fd(), NS_GET_USERNS.into()))
-                    };
-                    let stat = nix::sys::stat::fstat(fu.as_raw_fd())?;
-                    Ok(NSSlot::Provided(
-                        ExactNS {
-                            source: NSSource::Unavail,
-                            unique: stat.into(),
-                        },
-                        Default::default(),
-                    ))
-                }
-                _ => unreachable!(),
+        let fu = self.user_ns()?;
+        let stat = nix::sys::stat::fstat(fu.as_raw_fd())?;
+        Ok(NSSlot::Provided(
+            ExactNS {
+                source: NSSource::Unavail,
+                unique: stat.into(),
             },
-        }
+            Default::default(),
+        ))
     }
 }
+
+/// This represents a kind of error that is due to conditions not met, rather than trying and failing.
+#[derive(Error, Debug)]
+#[error("{:?}", self)]
+struct Unviable;
 
 defNS!(NSUser, CLONE_NEWUSER, "user", user);
 defNS!(NSMnt, CLONE_NEWNS, "mnt", mnt);
@@ -466,23 +526,23 @@ defNS!(NSNet, CLONE_NEWNET, "net", net);
 defNS!(NSUts, CLONE_NEWUTS, "uts", uts);
 defNS!(NSPid, CLONE_NEWPID, "pid", pid);
 
-pub fn nstypes() -> HashMap<&'static str, fn(&mut NSGroup, ExactNS)> {
+pub fn nstypes() -> HashMap<&'static str, fn(&mut NSGroup<ExactNS>, ExactNS)> {
     let mut map = HashMap::new();
     map.insert(
-        NSUser::NAME,
-        NSUser::set as for<'a> fn(&'a mut data::NSGroup, _),
+        <NSUser as NSTrait>::NAME,
+        NSUser::set as for<'a> fn(&'a mut data::NSGroup<ExactNS>, _),
     );
     map.insert(
-        NSMnt::NAME,
-        NSMnt::set as for<'a> fn(&'a mut data::NSGroup, _),
+        <NSMnt as NSTrait>::NAME,
+        NSMnt::set as for<'a> fn(&'a mut data::NSGroup<ExactNS>, _),
     );
     map.insert(
-        NSNet::NAME,
-        NSNet::set as for<'a> fn(&'a mut data::NSGroup, _),
+        <NSNet as NSTrait>::NAME,
+        NSNet::set as for<'a> fn(&'a mut data::NSGroup<ExactNS>, _),
     );
     map.insert(
-        NSUts::NAME,
-        NSUts::set as for<'a> fn(&'a mut data::NSGroup, _),
+        <NSUts as NSTrait>::NAME,
+        NSUts::set as for<'a> fn(&'a mut data::NSGroup<ExactNS>, _),
     );
     map
 }
@@ -493,17 +553,20 @@ pub macro defNS($name:ident, $flag:ident, $path:expr, $k:ident) {
     impl NSTrait for $name {
         const FLAG: CloneFlags = CloneFlags::$flag;
         const NAME: &'static str = $path;
-        fn set(g: &mut NSGroup, v: ExactNS) {
+        fn set<N>(g: &mut NSGroup<N>, v: N) {
             g.$k = NSSlot::Provided(v, Self);
         }
-        fn get(g: &NSGroup) -> &NSSlot<ExactNS, $name> {
+        fn get<N>(g: &NSGroup<N>) -> &NSSlot<N, $name> {
             &g.$k
+        }
+        fn get_mut<N>(g: &mut NSGroup<N>) -> &mut NSSlot<N, $name> {
+            &mut g.$k
         }
     }
 }
 
 impl<N: Validate, K: NSTrait> Validate for NSSlot<N, K> {
-    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup) -> Result<ValidateR> {
+    fn validate(&self, cache: &mut VaCache, ctx: &NSGroup<ExactNS>) -> Result<ValidateR> {
         match self {
             Self::Absent => Ok(ValidateR::Unspec),
             Self::Provided(k, _) => k.validate(cache, ctx),
@@ -514,8 +577,9 @@ impl<N: Validate, K: NSTrait> Validate for NSSlot<N, K> {
 pub trait NSTrait: Default {
     const FLAG: CloneFlags;
     const NAME: &'static str;
-    fn set(g: &mut NSGroup, v: ExactNS);
-    fn get(g: &NSGroup) -> &NSSlot<ExactNS, Self>;
+    fn set<N>(g: &mut NSGroup<N>, v: N);
+    fn get<N>(g: &NSGroup<N>) -> &NSSlot<N, Self>;
+    fn get_mut<N>(g: &mut NSGroup<N>) -> &mut NSSlot<N, Self>;
 }
 
 pub type RouteDAG = Dag<RouteNode, Route, Ix>;
@@ -568,7 +632,7 @@ impl Graphs {
         &mut self,
         pid: PidPath,
         paths: &PathState,
-        usermnt: Option<&NSGroup>,
+        usermnt: Option<&NSGroup<ExactNS>>,
         method: NSAdd,
         name: Option<String>,
     ) -> Result<(NSAddRes, NodeI)> {

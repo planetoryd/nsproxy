@@ -94,10 +94,10 @@ impl<K: NSTrait> NSSlot<ExactNS, K> {
 }
 
 #[public]
-impl NSGroup {
+impl NSGroup<ExactNS> {
     /// Returns the mounted procNSes from /proc/mountinfo
     /// Remember to enter userns (usually) or mounts wont be visible
-    fn mounted(paths: &PathState, id: NodeI) -> Result<HashMap<Ix, NSGroup>> {
+    fn mounted(paths: &PathState, id: NodeI) -> Result<HashMap<Ix, NSGroup<ExactNS>>> {
         let mut map = HashMap::new();
         let binds = paths.mount(id)?.0;
         let it = proc_mounts::MountIter::new()?;
@@ -363,7 +363,7 @@ impl<'p> UserNS<'p> {
         (self.0.user(), self.0.private().join("mnt"))
     }
     /// Generate a [ProcNS]
-    fn procns(&self) -> Result<NSGroup> {
+    fn procns(&self) -> Result<NSGroup<ExactNS>> {
         let (user, mnt) = self.paths();
         Ok(NSGroup {
             user: NSSlot::Provided(ExactNS::from_source(user)?, Default::default()),
