@@ -148,6 +148,7 @@ impl Graphs {
         &'g self,
         serv: &'g S,
         param: P,
+        root: bool,
     ) -> Result<()>
     where
         NodeWDeps<'n, 'd>: ItemCreate<Param = P, Serv = S>,
@@ -157,7 +158,9 @@ impl Graphs {
             // Each node is the an NS where probe enters
             let wdeps: NodeWDeps = self.nodewdeps(id)?;
             // Write the probe unit with Requires
-            wdeps.write(param.clone(), serv).await?;
+            if wdeps.0.item.root == root {
+                wdeps.write(param.clone(), serv).await?;
+            }
             // Override all the configs each time we execute a graph
             // This only concerns the probe services. The dependencies, daemons, and other user specified units are added as dependency.
         }

@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result, bail};
 use daggy::NodeIndex;
 use systemd_zbus::{ManagerProxy, Mode::Replace};
 use tun::Layer;
@@ -33,6 +33,7 @@ pub struct Systemd {
     systemd_unit: PathBuf,
     self_path: PathBuf,
     conn: zbus::Connection,
+    root: bool
 }
 
 impl<'b> MItem for Socks2TUN<'b> {
@@ -65,10 +66,21 @@ impl<'k> ItemRM for NodeIndexed<'k> {
     }
 }
 
+pub fn match_root(serv: &Systemd, root: bool) -> Result<()> {
+    if serv.root != root {
+        bail!("Can not manipulate systemd because you are running as {}", if serv.root {
+            "root"
+        } else {
+            "not root"
+        })
+    }
+    Ok(())
+}
+
 impl<'k> ItemAction for NodeIndexed<'k> {
     async fn restart(
         &self,
-        _serv: &Self::Serv,
+        serv: &Self::Serv,
         ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
     ) -> Result<()> {
         let n = self.service()?;
@@ -78,7 +90,7 @@ impl<'k> ItemAction for NodeIndexed<'k> {
     }
     async fn stop(
         &self,
-        _serv: &Self::Serv,
+        serv: &Self::Serv,
         ctx: &<Self::Serv as ServiceM>::Ctx<'_>,
     ) -> Result<()> {
         let n = self.service()?;
@@ -187,7 +199,7 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
             .set("Environment", "RUST_BACKTRACE=1");
         if let Some(p) = param {
             let p = p.canonicalize()?;
-            sec.set("Environment", format!("PathState={:?}", p));
+            sec.set("Environment", format!("RUST_BACKTRACE=1 PathState={:?}", p));
         }
         let servpath = serv.systemd_unit.join(&servname);
         service.write_to_file(&servpath)?;
@@ -235,7 +247,7 @@ impl<'b> ItemCreate for Socks2TUN<'b> {
             .set("Environment", "RUST_BACKTRACE=1");
         if let Some(p) = param.1 {
             let p = p.canonicalize()?;
-            sec.set("Environment", format!("PathState={:?}", p));
+            sec.set("Environment", format!("RUST_BACKTRACE=1 PathState={:?}", p));
         }
 
         let servname = self.service()?;
@@ -296,6 +308,7 @@ impl Systemd {
             tun2proxy_socks: path,
             self_path: current_exe()?,
             conn: conn.into(),
+            root
         })
     }
 }

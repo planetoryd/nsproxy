@@ -1,6 +1,7 @@
 #![feature(decl_macro)]
 #![feature(iter_next_chunk)]
 #![feature(array_try_map)]
+#![feature(ip_bits)]
 
 use std::collections::HashSet;
 use std::env::var;
@@ -20,7 +21,7 @@ use id_alloc::NetRange;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use libc::{uid_t, SIGTERM};
 use log::LevelFilter::{self, Debug};
-use netlink_ops::netlink::{nl_ctx, NLDriver, NLHandle, VethConn};
+use netlink_ops::netlink::{nl_ctx, NLDriver, NLHandle, VPairKey, VethConn};
 use netlink_ops::rtnetlink::netlink_proto::{new_connection_from_socket, NetlinkCodec};
 use netlink_ops::rtnetlink::netlink_sys::protocols::NETLINK_ROUTE;
 use netlink_ops::rtnetlink::netlink_sys::{Socket, TokioSocket};
@@ -28,7 +29,9 @@ use netlink_ops::rtnetlink::Handle;
 use netlink_ops::state::{Existence, ExpCollection};
 use nix::sched::{setns, unshare, CloneFlags};
 use nix::sys::wait::waitpid;
-use nix::unistd::{fork, getgid, getpid, getppid, sethostname, setresuid, ForkResult, Pid, Uid};
+use nix::unistd::{
+    fork, geteuid, getgid, getpid, getppid, getuid, sethostname, setresuid, ForkResult, Pid, Uid,
+};
 use nsproxy::data::{
     FDRecver, Graphs, NSAdd, NSAddRes, NSGroup, NSSlot, NSState, NodeAddr, NodeI, ObjectNode,
     PassFD, Relation, Validate, ValidateR, TUNC,
@@ -39,13 +42,14 @@ use nsproxy::managed::{
 };
 use nsproxy::paths::{PathState, Paths};
 use nsproxy::sys::{
-    check_capsys, cmd_uid, enable_ping_all, enable_ping_gid, what_uid, your_shell, UserNS,
+    check_capsys, cmd_uid, enable_ping_all, enable_ping_gid, systemd_connection,
+    unshare_user_standalone, what_uid, your_shell, UserNS,
 };
-use nsproxy::systemd::UnitName;
+use nsproxy::systemd::{match_root, UnitName};
 use nsproxy::watcher::FlatpakWatcher;
 use nsproxy::*;
 use nsproxy::{data::Ix, systemd};
-use nsproxy_common::NSSource::Unavail;
+use nsproxy_common::NSSource::{self, Unavail};
 use nsproxy_common::{ExactNS, NSFrom, PidPath, VaCache};
 use owo_colors::OwoColorize;
 use passfd::FdPassingExt;
@@ -150,14 +154,14 @@ enum Commands {
         uid: Option<u32>,
     },
     Sync,
-    /// Install nsproxy to your system. 
+    /// Install nsproxy to your system.
     Install {
         #[arg(long, short)]
         sproxy: bool,
         #[arg(long, short)]
         dstdir: Option<PathBuf>,
     },
-    Noop
+    Noop,
 }
 
 fn parse_node(addr: &str) -> Result<NodeAddr> {
@@ -187,10 +191,8 @@ enum NodeOps {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Noop => {
-            exit(0)
-        },
-        _ => ()
+        Commands::Noop => exit(0),
+        _ => (),
     }
 
     let subscriber = FmtSubscriber::builder()
@@ -201,15 +203,9 @@ fn main() -> Result<()> {
     LogTracer::init()?;
     info!("SHA1: {}", env!("VERGEN_GIT_SHA"));
     let cwd = std::env::current_dir()?;
-    
-    let paths: Paths = if let Ok(p) = var("PathState") {
-        let pb: PathBuf = p.parse()?;
-        PathState::load_file(&pb)?.into()
-    } else {
-        PathState::default()?.into()
-    };
 
-    // We must use a one thread runtime to not mess up NS.
+    let (pspath, paths): (PathBuf, PathState) = PathState::load()?;
+    let paths: Paths = paths.into();
 
     match cli.command {
         Commands::SOCKS2TUN {
@@ -229,8 +225,9 @@ fn main() -> Result<()> {
             let uid = what_uid(uid, true)?;
             tun2proxy = tun2proxy.canonicalize()?;
             // Connect and authenticate to systemd before entering userns
-            let pre = rt.block_on(async { zbus::Connection::session().await })?;
-            let mut uns = None;
+            let rootful = geteuid().is_root();
+            let pre = rt.block_on(async { systemd_connection(rootful).await })?;
+            let uns;
             let mut va = VaCache::default();
             graphs.prune(&mut va)?;
             let gid = getgid();
@@ -239,6 +236,10 @@ fn main() -> Result<()> {
                 Ok(_) => {
                     // The user is using SUID or sudo, or we are alredy in a userns, or user did setcap.
                     // Probably intentional
+                    uns = Some(NSGroup::proc_path(
+                        PidPath::Selfproc,
+                        Some(NSSource::Unavail(false)),
+                    )?);
                 }
                 _ => {
                     log::warn!("CAP_SYS_ADMIN not available, entering user NS (I assume you want to use UserNS)");
@@ -255,31 +256,8 @@ fn main() -> Result<()> {
                         uns.as_ref().unwrap().enter(&ctx)?;
                         log::info!("Entered user, mnt NS");
                     } else {
-                        log::warn!(
-                            "Unsharing into a new UserNS. This method currently has limitations."
-                        );
-                        unshare(CloneFlags::CLONE_NEWUSER)?;
-
-                        let mut f = OpenOptions::new()
-                            .write(true)
-                            .open(format!("/proc/self/uid_map"))?;
-                        f.write_all(format!("{uid} {uid} 1").as_bytes())?;
-
-                        let mut f = OpenOptions::new()
-                            .write(true)
-                            .open(format!("/proc/self/setgroups"))?;
-                        f.write_all(b"deny")?;
-
-                        let mut f = OpenOptions::new()
-                            .write(true)
-                            .open(format!("/proc/self/gid_map"))?;
-                        f.write_all(format!("{gid} {gid} 1",).as_bytes())?;
                         // let spid = getpid();
-                        uns = Some(NSGroup {
-                            // we have unshared user ns
-                            user: NSSlot::from_source(PidPath::Selfproc)?,
-                            ..Default::default()
-                        });
+                        uns = Some(unshare_user_standalone(uid, gid.as_raw())?);
                     }
                     check_capsys()?;
                 }
@@ -294,7 +272,7 @@ fn main() -> Result<()> {
             let mut buf = [0; 1];
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
             let (r, src) = if let Some(pid) = pid {
-                graphs.add_ns(PidPath::N(pid), &paths, uns.as_ref(), ns_add, name)?
+                graphs.add_ns(PidPath::N(pid), &paths, uns.as_ref(), ns_add, name, rootful)?
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
@@ -335,6 +313,7 @@ fn main() -> Result<()> {
                             // We have no privs to mount with when new_userns==true
                             ns_add,
                             name,
+                            rootful,
                         )?;
                         sp.write_all(&[1])?;
                         k
@@ -354,6 +333,7 @@ fn main() -> Result<()> {
                         uns.as_ref(),
                         NSAdd::RecordNothing,
                         None,
+                        rootful,
                     )?;
                     (out, graphs.data.add_edge(src, out, None))
                 };
@@ -364,15 +344,17 @@ fn main() -> Result<()> {
                 );
 
                 let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                let serv = systemd::Systemd::new(&paths, pre, false).await?;
+                let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
                 let ctx = serv.ctx().await?;
                 // TODO: TUN2proxy when TAP
-                let rel = socks2t.write((Layer::L3, None), &serv).await?;
+                let rel = socks2t
+                    .write((Layer::L3, Some(pspath.clone())), &serv)
+                    .await?;
                 graphs.data[edge].replace(rel);
                 graphs.dump_file(&paths)?;
                 let nw = graphs.nodewdeps(src)?;
 
-                nw.write(None, &serv).await?;
+                nw.write(Some(pspath.clone()), &serv).await?;
                 serv.reload(&ctx).await?;
                 nw.1.restart(&serv, &ctx).await?;
                 nw.0.restart(&serv, &ctx).await?;
@@ -480,10 +462,11 @@ fn main() -> Result<()> {
                 .build()?;
             rt.block_on(async {
                 let (sx, mut rx) = mpsc::channel(5);
-                let pre = zbus::Connection::session().await?;
+                let rootful = geteuid().is_root();
+                let pre = systemd_connection(rootful).await?;
                 let dae = tokio::spawn(fpwatch.daemon(uid, sx));
                 let looper = async move {
-                    let serv = systemd::Systemd::new(&paths, pre, false).await?;
+                    let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
                     let ctx = serv.ctx().await?;
                     while let Some(fe) = rx.recv().await {
                         if dryrun {
@@ -496,6 +479,7 @@ fn main() -> Result<()> {
                             None,
                             NSAdd::RecordNothing,
                             None,
+                            rootful,
                         )?;
                         let (r, src) = graphs.add_ns(
                             PidPath::N(fe.pid.try_into()?),
@@ -503,6 +487,7 @@ fn main() -> Result<()> {
                             None,
                             NSAdd::Flatpak,
                             Some(fe.name()),
+                            rootful,
                         )?;
                         if matches!(r, NSAddRes::Found) {
                             log::warn!("Skipping, Net NS exists in state file");
@@ -514,12 +499,14 @@ fn main() -> Result<()> {
                             graphs.data[src].as_ref().unwrap().main.key()
                         );
                         let socks2t = Socks2TUN::new(&path, edge)?;
-                        let rel = socks2t.write((Layer::L3, None), &serv).await?;
+                        let rel = socks2t
+                            .write((Layer::L3, Some(pspath.clone())), &serv)
+                            .await?;
                         graphs.data[edge].replace(rel);
                         graphs.dump_file(&paths)?;
                         serv.reload(&ctx).await?;
                         let nw = graphs.nodewdeps(src)?;
-                        nw.write(None, &serv).await?;
+                        nw.write(Some(pspath.clone()), &serv).await?;
                         nw.1.restart(&serv, &ctx).await?;
                         nw.0.restart(&serv, &ctx).await?;
 
@@ -555,11 +542,12 @@ fn main() -> Result<()> {
         }
         Commands::Userns { rmall, uid, node } => {
             let usern = UserNS(&paths);
+            let rootful = geteuid().is_root();
             if usern.exist()? {
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
                 usern.procns()?.enter(&ctx)?;
                 if rmall {
-                    NSGroup::rmall(&paths)?;
+                    NSGroup::rmall(&paths, rootful)?;
                 } else {
                     // This process gains full caps after setns, so we can do whatever.
                     if let Some(uid) = uid {
@@ -641,9 +629,12 @@ fn main() -> Result<()> {
                             .enable_all()
                             .build()?;
                         rt.block_on(async {
-                            let conn = zbus::Connection::session().await?;
-                            let serv = systemd::Systemd::new(&paths, conn, false).await?;
+                            let rootful = geteuid().is_root();
+                            let pre = systemd_connection(rootful).await?;
+                            let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
                             let ctx = serv.ctx().await?;
+                            match_root(&serv, node.item.root)?;
+                            // A node is root implies deps are located in root systemd directories too
                             deps.restart(&serv, &ctx).await?;
                             node.restart(&serv, &ctx).await?;
                             aok!()
@@ -678,7 +669,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Veth {
-            mut uid,
+            uid,
             cmd,
             mut tun2proxy,
         } => {
@@ -687,8 +678,7 @@ fn main() -> Result<()> {
             if let Some(ref mut tun2proxy) = tun2proxy {
                 *tun2proxy = tun2proxy.canonicalize()?;
             }
-            let mut pspath: PathBuf = "./nsproxy.paths".parse()?;
-            paths.dump_file(&pspath)?;
+            let mut k = [0 ;1];
             let (mut sp, mut sc) = UnixStream::pair()?;
             match unsafe { fork() }? {
                 ForkResult::Child => {
@@ -700,11 +690,11 @@ fn main() -> Result<()> {
                     sc.send_fd(nl.as_raw_fd())?;
                     cmd_uid(uid, true)?;
                     // sp.write_all(&[0])?;
-                    // sp.read_exact(&mut k)?;
                     prctl::set_pdeathsig(Some(SIGTERM))?;
                     log::info!("In-netns process, {:?} (fork child)", getpid());
                     let mut cmd =
                         Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
+                    sp.read_exact(&mut k)?;
                     cmd.spawn()?.wait()?;
                 }
                 ForkResult::Parent { child } => {
@@ -712,7 +702,9 @@ fn main() -> Result<()> {
                         .enable_all()
                         .build()?;
                     rt.block_on(async {
+                        let rootful = geteuid().is_root();
                         let fd = sp.recv_fd()?;
+                        let mut veth_key: Option<VPairKey> = None;
                         if let Some(tun2proxy) = tun2proxy {
                             let (_, src) = graphs.add_ns(
                                 PidPath::N(child.as_raw()),
@@ -720,6 +712,7 @@ fn main() -> Result<()> {
                                 None,
                                 NSAdd::RecordProcfsPaths,
                                 None,
+                                rootful,
                             )?;
                             let (_, out) = graphs.add_ns(
                                 PidPath::Selfproc,
@@ -727,9 +720,13 @@ fn main() -> Result<()> {
                                 None,
                                 NSAdd::RecordNothing,
                                 None,
+                                rootful,
                             )?;
+                            veth_key =
+                                Some(format!("v{}to{}", src.index(), out.index()).try_into()?);
                             let edge = graphs.data.add_edge(src, out, None);
-                            let pre = zbus::Connection::system().await?;
+
+                            let pre = systemd_connection(rootful).await?;
                             let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
                             let serv = systemd::Systemd::new(&paths, pre, true).await?;
                             let ctx = serv.ctx().await?;
@@ -745,6 +742,7 @@ fn main() -> Result<()> {
                             serv.reload(&ctx).await?;
                             nw.1.restart(&serv, &ctx).await?;
                             nw.0.restart(&serv, &ctx).await?;
+                            sc.write_all(&[0])?;
                             graphs.close()?;
                         }
 
@@ -769,6 +767,9 @@ fn main() -> Result<()> {
                             nl_ctx!(link, conn, nl_ch);
                             conn.set_up(link.map.get_mut(&"lo".parse()?).unwrap().exist_mut()?)
                                 .await?;
+                        }
+                        {
+                            nl_ctx!(link, conn, nl);
                             for (k, ex) in link.map {
                                 if let Existence::Exist(li) = ex {
                                     match &li.addrs {
@@ -791,6 +792,11 @@ fn main() -> Result<()> {
                         let n6: [_; 2] = net6.iter().next_chunk().unwrap();
                         let n6net: [_; 2] =
                             n6.try_map(|n| Ipv6Network::new(n, p6))?.map(|n| n.into());
+                        let mask = (!0 >> dom4.prefix()) & net4.mask().to_bits();
+                        let num = (net4.ip().to_bits() & mask) >> h4;
+                        if veth_key.is_none() {
+                            veth_key = Some(format!("nsproxy{}", num).try_into()?);
+                        }
                         let vc = VethConn {
                             subnet_veth: net4.into(),
                             subnet6_veth: net6.into(),
@@ -798,7 +804,7 @@ fn main() -> Result<()> {
                             ip_vb: Ipv4Network::new(net4.nth(1).unwrap(), p4)?.into(),
                             ip6_va: n6net[0],
                             ip6_vb: n6net[1],
-                            key: "ve".parse()?,
+                            key: veth_key.unwrap(),
                         };
                         vc.apply(&mut nl_ch, &mut nl).await?;
                         let mut nl_ch = NLDriver::new(nl_ch.conn);
@@ -826,10 +832,11 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             rt.block_on(async {
-                let pre = zbus::Connection::session().await?;
-                let serv = systemd::Systemd::new(&paths, pre, false).await?;
+                let rootful = geteuid().is_root();
+                let pre = systemd_connection(rootful).await?;
+                let serv = systemd::Systemd::new(&paths, pre, rootful).await?;
                 // let ctx = serv.ctx().await?;
-                graphs.write_probes(&serv, None).await?;
+                graphs.write_probes(&serv, Some(pspath), rootful).await?;
                 aok!()
             })?;
         }

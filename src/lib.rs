@@ -7,6 +7,7 @@
 #![allow(async_fn_in_trait)]
 #![feature(iterator_try_collect)]
 #![feature(error_generic_member_access)]
+#![feature(ip_bits)]
 
 pub mod data;
 pub mod flatpak;

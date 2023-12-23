@@ -35,6 +35,10 @@ pub use nsproxy_common::*;
 struct ObjectNode {
     name: Option<String>,
     main: NSGroup<ExactNS>,
+    /// Created by the root user
+    /// It means all systemd services of this node belong to root
+    /// which is separated from the user services
+    root: bool,
 }
 
 #[public]
@@ -182,15 +186,18 @@ impl<'n> NSState<'n> {
         let cache = &mut self.va;
         let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
         let mut val = NSGroup::<[Option<ValidateR>; 2]>::default();
-        if ctx.pid.must()?.unique == self.target.pid.must()?.unique {
+        let ctx = if ctx.pid.must()?.unique == self.target.pid.must()?.unique {
             if ctx.mnt.must()?.unique == self.target.mnt.must()?.unique {
                 val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
+                let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
+                ctx
             } else {
                 val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
                 val.validate_all(cache, &ctx, self.target, 1)?;
+                ctx
             }
         } else {
             if ctx.mnt.must()?.unique == self.target.mnt.must()?.unique {
@@ -198,14 +205,18 @@ impl<'n> NSState<'n> {
                 self.target.enter(&ctx)?;
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
                 val.validate_all(cache, &ctx, self.target, 1)?;
+                ctx
             } else {
                 val.validate_all(cache, &ctx, self.target, 0)?;
                 self.target.enter(&ctx)?;
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
                 val.validate_all(cache, &ctx, self.target, 1)?;
+                ctx
             }
-        }
+        };
         log::info!("{}", &val);
+        assert_eq!(self.target.net.must()?.unique, ctx.net.must()?.unique);
+        assert_eq!(self.target.uts.must()?.unique, ctx.uts.must()?.unique);
         Ok(())
     }
 }
@@ -246,7 +257,7 @@ impl<const L: usize> NSGroup<[Option<ValidateR>; L]> {
                             ValidateR::Impossible
                         }
                     }
-                    NSSource::Unavail => ValidateR::Unspec,
+                    NSSource::Unavail(_) => ValidateR::Unspec,
                 },
             });
         }
@@ -302,8 +313,9 @@ pub fn mount_ns_by_pid(
     paths: &PathState,
     id: NodeI,
     do_mount: bool,
+    root: bool,
 ) -> Result<NSGroup<ExactNS>> {
-    let binds = paths.mount(id)?;
+    let binds = paths.mount(id, root)?;
     let mut nsg: NSGroup<ExactNS> = NSGroup::default();
     mount_by_pid!(pid, &binds, nsg, do_mount, [net, uts, pid]);
     Ok(nsg)
@@ -314,11 +326,12 @@ impl NSGroup<ExactNS> {
     fn enter(&self, ctx: &NSGroup<ExactNS>) -> Result<()> {
         match &self.user {
             NSSlot::Provided(ns, _) => {
-                if matches!(ns.source, NSSource::Unavail) {
-                    info!("Enter UserNS by ioctl-ing Net NS");
-
-                    let usr = self.net.user_ns()?;
-                    setns(&usr, CloneFlags::CLONE_NEWUSER)?;
+                if let NSSource::Unavail(b) = ns.source {
+                    if b {
+                        info!("Enter UserNS by ioctl-ing Net NS");
+                        let usr = self.net.user_ns()?;
+                        setns(&usr, CloneFlags::CLONE_NEWUSER)?;
+                    }
                 } else {
                     self.user.enter_if(ctx)?;
                 }
@@ -429,7 +442,7 @@ impl Validate for ExactNS {
                 let st = cached_fstat(cache, (*p, &ctx.pid.must()?.unique))?;
                 self.unique.validate(st)?;
             }
-            NSSource::Unavail => return Ok(ValidateR::Unspec),
+            NSSource::Unavail(_) => return Ok(ValidateR::Unspec),
         }
         Ok(ValidateR::Pass)
     }
@@ -452,7 +465,7 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
                 if K::get(ctx).must()?.unique == ns.unique {
                     Ok(())
                 } else {
-                    if ns.source == NSSource::Unavail {
+                    if matches!(ns.source, NSSource::Unavail(_)) {
                         Ok(())
                     } else {
                         log::info!("Enter {:?}, {}", K::NAME, ns);
@@ -507,7 +520,7 @@ impl<K: NSTrait + PartialEq> NSSlot<ExactNS, K> {
         let stat = nix::sys::stat::fstat(fu.as_raw_fd())?;
         Ok(NSSlot::Provided(
             ExactNS {
-                source: NSSource::Unavail,
+                source: NSSource::Unavail(true),
                 unique: stat.into(),
             },
             Default::default(),
@@ -635,6 +648,7 @@ impl Graphs {
         usermnt: Option<&NSGroup<ExactNS>>,
         method: NSAdd,
         name: Option<String>,
+        rootful: bool,
     ) -> Result<(NSAddRes, NodeI)> {
         let ns = NSGroup::key_ident(pid)?;
         let uf = ns.unique;
@@ -650,15 +664,17 @@ impl Graphs {
                 let mut node = match method {
                     NSAdd::RecordMountedPaths => {
                         // Always try unmount
-                        NSGroup::umount(ix, paths)?;
-                        mount_ns_by_pid(pid, paths, ix, true)?
+                        NSGroup::umount(ix, paths, rootful)?;
+                        mount_ns_by_pid(pid, paths, ix, true, rootful)?
                     }
                     NSAdd::RecordProcfsPaths => NSGroup::proc_path(pid.to_n(), None)?,
-                    NSAdd::RecordNothing => NSGroup::proc_path(pid, Some(NSSource::Unavail))?,
+                    NSAdd::RecordNothing => {
+                        NSGroup::proc_path(pid, Some(NSSource::Unavail(false)))?
+                    }
                     NSAdd::Flatpak => {
                         let mut g = NSGroup::default();
                         // Prevents entering by setting to unavail
-                        assign!(g, [pid, mnt], proc_path, pid, Some(NSSource::Unavail));
+                        assign!(g, [pid, mnt], proc_path, pid, Some(NSSource::Unavail(true)));
                         assign!(g, [net, uts], proc_path, pid, None);
                         g.user = g.net.user_ns_slot()?;
                         g
@@ -670,7 +686,11 @@ impl Graphs {
                 if let Some(ref na) = name {
                     self.name.insert(na.clone(), ix);
                 }
-                self.data[ix].replace(ObjectNode { name, main: node });
+                self.data[ix].replace(ObjectNode {
+                    name,
+                    main: node,
+                    root: rootful,
+                });
                 Ok((NSAddRes::NewNS, *va.insert(ix)))
             }
         }

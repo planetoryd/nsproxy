@@ -1,8 +1,9 @@
 use std::{
     fs::{create_dir_all, Permissions},
+    io::Read,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc, io::Read,
+    sync::Arc,
 };
 
 use crate::{
@@ -64,6 +65,17 @@ impl PathState {
             PathState::default()
         }
     }
+    fn load() -> Result<(PathBuf, Self)> {
+        let pa = if let Ok(p) = std::env::var("PathState") {
+            p.parse()?
+        } else {
+            let dpaths = PathState::default()?;
+            dpaths.dump_paths()?;
+            dpaths.pathspath()
+        };
+        let pb = PathState::load_file(&pa)?;
+        Ok((pa, pb))
+    }
     fn default() -> Result<Self> {
         let dirs = xdg::BaseDirectories::with_prefix(DIRPREFIX)?;
         let k = Self {
@@ -88,9 +100,9 @@ impl PathState {
         create_dir_all(&self.state)?;
         Ok(())
     }
-    fn mount(&self, id: NodeI) -> Result<Binds> {
+    fn mount(&self, id: NodeI, root: bool) -> Result<Binds> {
         Ok(Binds(checked_path(
-            self.binds.join(id.index().to_string()),
+            if root { &self.priv_binds } else { &self.binds }.join(id.index().to_string()),
         )?))
     }
     fn private(&self) -> PathBuf {
@@ -110,6 +122,12 @@ impl PathState {
     }
     fn flatpak(&self) -> PathBuf {
         self.config.join("flatpak.json")
+    }
+    fn pathspath(&self) -> PathBuf {
+        self.config.join("paths")
+    }
+    fn dump_paths(&self) -> Result<()> {
+        self.dump_file(&self.pathspath())
     }
 }
 

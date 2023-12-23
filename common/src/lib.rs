@@ -35,7 +35,7 @@ impl Display for ExactNS {
         match self.source {
             NSSource::Pid(ref p) => f.write_fmt(format_args!("from pid {}", p.bright_purple())),
             NSSource::Path(ref p) => f.write_fmt(format_args!("at {:?}", p.yellow())),
-            NSSource::Unavail => f.write_fmt(format_args!("{}", "Unavailable".magenta())),
+            NSSource::Unavail(b) => f.write_fmt(format_args!("{}", "Unavailable".magenta())),
         }
     }
 }
@@ -198,7 +198,8 @@ pub enum NSSource {
     /// Ex. running as an unprivileged process, the root NS can't be stated. 
     /// And we don't keep ephemeral proc fs paths either
     /// Treated as path when validating
-    Unavail,
+    /// True for IOCTL-able
+    Unavail(bool),
 }
 
 #[derive(Default)]

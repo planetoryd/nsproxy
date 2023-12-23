@@ -22,6 +22,7 @@ use anyhow::{bail, ensure};
 use daggy::NodeIndex;
 use libc::{pid_t, stat, syscall, uid_t};
 use tracing::info;
+use zbus::Connection;
 
 use super::*;
 use crate::{
@@ -97,9 +98,9 @@ impl<K: NSTrait> NSSlot<ExactNS, K> {
 impl NSGroup<ExactNS> {
     /// Returns the mounted procNSes from /proc/mountinfo
     /// Remember to enter userns (usually) or mounts wont be visible
-    fn mounted(paths: &PathState, id: NodeI) -> Result<HashMap<Ix, NSGroup<ExactNS>>> {
+    fn mounted(paths: &PathState, id: NodeI, root: bool) -> Result<HashMap<Ix, NSGroup<ExactNS>>> {
         let mut map = HashMap::new();
-        let binds = paths.mount(id)?.0;
+        let binds = paths.mount(id, root)?.0;
         let it = proc_mounts::MountIter::new()?;
         let maps = nstypes();
         for m in it {
@@ -121,8 +122,8 @@ impl NSGroup<ExactNS> {
         Ok(map)
     }
     /// Umount all namespaces and remove the dir
-    fn umount(id: NodeI, paths: &PathState) -> Result<()> {
-        let binds = paths.mount(id)?.0;
+    fn umount(id: NodeI, paths: &PathState, root: bool) -> Result<()> {
+        let binds = paths.mount(id, root)?.0;
         for e in std::fs::read_dir(&binds)? {
             let e = e?;
             let p = e.path();
@@ -144,13 +145,13 @@ impl NSGroup<ExactNS> {
         }
         Ok(())
     }
-    fn rmall(paths: &PathState) -> Result<()> {
+    fn rmall(paths: &PathState, root: bool) -> Result<()> {
         for dir in std::fs::read_dir(&paths.binds)? {
             let dir = dir?;
             if dir.file_type()?.is_dir() {
                 let pa: Result<u32, _> = dir.file_name().to_string_lossy().parse();
                 if let Ok(id) = pa {
-                    Self::umount(id.into(), paths)?;
+                    Self::umount(id.into(), paths, root)?;
                 }
             }
         }
@@ -170,7 +171,7 @@ fn mount_self() -> Result<()> {
     let path = PathState::default()?;
     let path: Paths = path.into();
     dbg!(path.clone());
-    let mounted = mount_ns_by_pid(PidPath::Selfproc, &path, 3.into(), true)?;
+    let mounted = mount_ns_by_pid(PidPath::Selfproc, &path, 3.into(), true, false)?;
     dbg!(mounted);
 
     Ok(())
@@ -193,7 +194,7 @@ impl NSEnter for NSSource {
                 let fd = unsafe { pidfd::PidFd::open(*p, 0) }?;
                 setns(fd, f)?;
             }
-            Self::Unavail => unreachable!(),
+            Self::Unavail(_) => unreachable!(),
         }
         Ok(())
     }
@@ -504,4 +505,38 @@ pub fn what_uid(uid: Option<u32>, allow_root: bool) -> Result<u32> {
             }
         }
     }
+}
+
+/// Unshare the process into a separate userns, rootless
+/// Map one single uid, and gid.
+pub fn unshare_user_standalone(uid: u32, gid: u32) -> Result<NSGroup<ExactNS>> {
+    log::warn!("Unsharing into a new UserNS. This method currently has limitations.");
+    unshare(CloneFlags::CLONE_NEWUSER)?;
+    let mut f = OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/uid_map"))?;
+    f.write_all(format!("{uid} {uid} 1").as_bytes())?;
+    let mut f = OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/setgroups"))?;
+    f.write_all(b"deny")?;
+    let mut f = OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/gid_map"))?;
+    f.write_all(format!("{gid} {gid} 1",).as_bytes())?;
+    Ok(NSGroup {
+        // we have unshared user ns
+        user: NSSlot::from_source(PidPath::Selfproc)?,
+        ..Default::default()
+    })
+}
+
+pub async fn systemd_connection(root: bool) -> Result<Connection> {
+    let z = if root {
+        log::info!("Connecting systemd as root");
+        zbus::Connection::system().await?
+    } else {
+        zbus::Connection::session().await?
+    };
+    Ok(z)
 }
