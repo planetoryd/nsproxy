@@ -206,9 +206,6 @@ fn main() -> Result<()> {
     info!("SHA1: {}", env!("VERGEN_GIT_SHA"));
     let cwd = std::env::current_dir()?;
 
-    let (pspath, paths): (PathBuf, PathState) = PathState::load()?;
-    let paths: Paths = paths.into();
-
     match cli.command {
         Commands::SOCKS2TUN {
             pid,
@@ -219,12 +216,19 @@ fn main() -> Result<()> {
             new_userns,
             out,
         } => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let paths: Paths = paths.into();
+            
             let mut graphs = Graphs::load_file(&paths)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
             let capsys = check_capsys();
+
             let uid = what_uid(uid, true)?;
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(uid)?;
+            let paths: Paths = paths.into();
+
             tun2proxy = tun2proxy.canonicalize()?;
             // Connect and authenticate to systemd before entering userns
             let rootful = geteuid().is_root();
@@ -367,6 +371,9 @@ fn main() -> Result<()> {
             waitpid(Some(Pid::from_raw(-1)), None)?;
         }
         Commands::Probe { id } => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let paths: Paths = paths.into();
+
             let graphs = Graphs::load_file(&paths)?;
             // Load graphs, send FDs over socket
             let (node, deps) = graphs.nodewdeps(NodeI::from(id))?;
@@ -445,7 +452,10 @@ fn main() -> Result<()> {
             })?;
         }
         Commands::Watch { mut path, dryrun } => {
+            // I think there is no root flatpak /run/ dir. therefore false.
             let uid = what_uid(None, false)?;
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(uid)?;
+            let paths: Paths = paths.into();
             let fpwatch = FlatpakWatcher::default();
             let fpath = paths.flatpak();
             path = path.canonicalize()?;
@@ -523,6 +533,8 @@ fn main() -> Result<()> {
             })?;
         }
         Commands::Init { undo } => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, false)?)?;
+            let paths: Paths = paths.into();
             let usern = UserNS(&paths);
             check_capsys()?;
             paths.create_dirs_priv()?;
@@ -535,7 +547,7 @@ fn main() -> Result<()> {
                 } else {
                     let mut graphs = Graphs::load_file(&paths)?;
                     let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-                    let owner = std::env::var("SUDO_UID")?.parse()?;
+                    let owner = what_uid(None, false)?;
                     usern.init(owner)?;
                     graphs.dump_file(&paths)?;
                     log::info!("{:?}", usern.paths());
@@ -543,13 +555,16 @@ fn main() -> Result<()> {
             }
         }
         Commands::Userns { rmall, uid, node } => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, false)?)?;
+            let paths: Paths = paths.into();
+
             let usern = UserNS(&paths);
             let rootful = geteuid().is_root();
             if usern.exist()? {
                 let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
                 usern.procns()?.enter(&ctx)?;
                 if rmall {
-                    NSGroup::rmall(&paths, rootful)?;
+                    NSGroup::rmall(&paths, false)?;
                 } else {
                     // This process gains full caps after setns, so we can do whatever.
                     if let Some(uid) = uid {
@@ -566,6 +581,8 @@ fn main() -> Result<()> {
             }
         }
         Commands::Node { id, op } => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let paths: Paths = paths.into();
             let mut graphs = Graphs::load_file(&paths)?;
             let require_id = || {
                 if let Some(id) = id {
@@ -679,6 +696,8 @@ fn main() -> Result<()> {
             }
         }
         Commands::Info => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let paths: Paths = paths.into();
             log::info!("{:?}", &paths);
             log::info!(
                 "UserNS, {:?}, mounted: {}",
@@ -696,6 +715,8 @@ fn main() -> Result<()> {
             cmd,
             mut tun2proxy,
         } => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let paths: Paths = paths.into();
             // sysctl net.ipv4.ip_forward=1
             let mut graphs = Graphs::load_file(&paths)?;
             if let Some(ref mut tun2proxy) = tun2proxy {
@@ -854,6 +875,8 @@ fn main() -> Result<()> {
             cmd.spawn()?.wait()?;
         }
         Commands::Sync => {
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let paths: Paths = paths.into();
             let graphs = Graphs::load_file(&paths)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

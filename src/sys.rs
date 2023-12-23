@@ -146,7 +146,7 @@ impl NSGroup<ExactNS> {
         Ok(())
     }
     fn rmall(paths: &PathState, root: bool) -> Result<()> {
-        for dir in std::fs::read_dir(&paths.binds)? {
+        for dir in std::fs::read_dir(paths.binds()?)? {
             let dir = dir?;
             if dir.file_type()?.is_dir() {
                 let pa: Result<u32, _> = dir.file_name().to_string_lossy().parse();
@@ -168,7 +168,7 @@ impl NSGroup<ExactNS> {
 // test this with ./unshare.sh
 #[test]
 fn mount_self() -> Result<()> {
-    let path = PathState::default()?;
+    let path = PathState::default(1000)?;
     let path: Paths = path.into();
     dbg!(path.clone());
     let mounted = mount_ns_by_pid(PidPath::Selfproc, &path, 3.into(), true, false)?;
@@ -376,7 +376,7 @@ impl<'p> UserNS<'p> {
 
 #[test]
 fn show_userns_path() -> Result<()> {
-    let path = PathState::default()?;
+    let path = PathState::default(1000)?;
     let usern = UserNS(&path);
     dbg!(usern.paths());
 
@@ -385,7 +385,7 @@ fn show_userns_path() -> Result<()> {
 
 #[test]
 fn test_userns() -> Result<()> {
-    let path = PathState::default()?;
+    let path = PathState::default(1000)?;
     let usern = UserNS(&path);
     dbg!(usern.paths());
     usern.init(1000)?;
@@ -395,7 +395,7 @@ fn test_userns() -> Result<()> {
 
 #[test]
 fn userns_deinit() -> Result<()> {
-    let path = PathState::default()?;
+    let path = PathState::default(1000)?;
     let usern = UserNS(&path);
     dbg!(usern.paths());
     usern.deinit()?;

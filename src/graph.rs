@@ -73,23 +73,31 @@ impl Graphs {
     pub fn load_file(path: &PathState) -> Result<Self> {
         let gp = Self::path(path);
         info!("Load graphs from {:?}", &gp);
-        if gp.exists() {
+        let mut thing: Option<Self> = None; 
+        let file = if gp.exists() {
             let mut file = std::fs::File::open(&gp)?;
             file.try_lock_exclusive()
                 .map_err(|_| anyhow!("State file locked"))?;
             let mut st = Default::default();
             file.read_to_string(&mut st)?;
-            Self::load(&st)
+            let k = Self::load(&st);
+            if let Ok(stuff) = k {
+                thing = Some(stuff)
+            } else {
+                log::warn!("Corrupted state file. Reset");
+            }
+            file
         } else {
             let f = std::fs::File::create(&gp)?;
             assert!(gp.exists());
             f.try_lock_exclusive()
                 .map_err(|_| anyhow!("State file locked"))?;
-            Ok(Graphs {
-                file: Some(f),
-                ..Default::default()
-            })
-        }
+            f
+        };
+        Ok(Graphs {
+            file: Some(file),
+            ..thing.unwrap_or_default()
+        })
     }
     pub fn close(self) -> Result<()> {
         if let Some(ref f) = self.file {

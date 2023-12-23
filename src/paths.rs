@@ -15,6 +15,7 @@ use super::*;
 use anyhow::anyhow;
 use daggy::NodeIndex;
 use fs4::FileExt;
+use nix::unistd::geteuid;
 use serde::{Deserialize, Serialize};
 use serde_json::from_str;
 use tracing::info;
@@ -25,10 +26,13 @@ use xdg;
 #[derive(Debug, Serialize, Deserialize)]
 struct PathState {
     config: PathBuf,
-    binds: PathBuf,
+    /// We need to make sure the paths of .binds are exclusively used by user NS (if its used)
+    /// If regular mounts get here problems will happen
+    /// Therefore, non-user-ns binds will never be mounted on .binds
+    binds: Option<PathBuf>,
     /// Privileged binds. This path shall not change across users
-    /// because the user might use sudo to create them and use it as someone else
     priv_binds: PathBuf,
+    /// Transient state that should not persist
     state: PathBuf,
 }
 
@@ -47,7 +51,7 @@ impl PathState {
         serde_json::to_writer_pretty(&file, self)?;
         Ok(())
     }
-    pub fn load_file(pa: &Path) -> Result<Self> {
+    pub fn load_file(pa: &Path, uid: u32) -> Result<Self> {
         info!("Load PathState from {:?}", pa);
         if pa.exists() {
             let mut file = std::fs::File::open(pa)?;
@@ -62,28 +66,38 @@ impl PathState {
             assert!(pa.exists());
             f.try_lock_exclusive()
                 .map_err(|_| anyhow!("State file locked"))?;
-            PathState::default()
+            PathState::default(uid)
         }
     }
-    fn load() -> Result<(PathBuf, Self)> {
+    fn load(whatuid: u32) -> Result<(PathBuf, Self)> {
         let pa = if let Ok(p) = std::env::var("PathState") {
             p.parse()?
         } else {
-            let dpaths = PathState::default()?;
+            let dpaths = PathState::default(whatuid)?;
             dpaths.dump_paths()?;
             dpaths.pathspath()
         };
-        let pb = PathState::load_file(&pa)?;
+        let pb = PathState::load_file(&pa, whatuid)?;
         Ok((pa, pb))
     }
-    fn default() -> Result<Self> {
+    fn default(uid: u32) -> Result<Self> {
         let dirs = xdg::BaseDirectories::with_prefix(DIRPREFIX)?;
-        let k = Self {
-            config: dirs.get_config_home(),
-            // we persist NSes across reboots even tho re-creating them is cheap.
-            binds: dirs.get_data_home(),
-            state: dirs.get_state_home(),
-            priv_binds: "/etc/nsproxy/".into(),
+        let k = if uid != 0 {
+            let user_run: PathBuf = format!("/run/user/{}/nsproxy/", uid).parse()?;
+            Self {
+                config: dirs.get_config_home(),
+                binds: Some(user_run.clone()),
+                state: user_run,
+                priv_binds: "/run/nsproxy/".into(),
+            }
+        } else {
+            Self {
+                config: dirs.get_config_home(),
+                binds: None,
+                // when we can not get a per-user graph
+                state: "/run/nsproxy/root".into(),
+                priv_binds: "/run/nsproxy/".into(),
+            }
         };
         k.create_dirs()?;
         Ok(k)
@@ -94,15 +108,25 @@ impl PathState {
         std::fs::set_permissions(&self.priv_binds, perms)?;
         Ok(())
     }
+    fn binds(&self) -> Result<&PathBuf> {
+        self.binds
+            .as_ref()
+            .ok_or(anyhow!("Binds directory (for non root) not available"))
+    }
     fn create_dirs(&self) -> Result<()> {
         create_dir_all(&self.config)?;
-        create_dir_all(&self.binds)?;
+        create_dir_all(self.binds()?)?;
         create_dir_all(&self.state)?;
         Ok(())
     }
     fn mount(&self, id: NodeI, root: bool) -> Result<Binds> {
         Ok(Binds(checked_path(
-            if root { &self.priv_binds } else { &self.binds }.join(id.index().to_string()),
+            if root {
+                &self.priv_binds
+            } else {
+                self.binds()?
+            }
+            .join(id.index().to_string()),
         )?))
     }
     fn private(&self) -> PathBuf {
