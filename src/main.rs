@@ -678,7 +678,7 @@ fn main() -> Result<()> {
             if let Some(ref mut tun2proxy) = tun2proxy {
                 *tun2proxy = tun2proxy.canonicalize()?;
             }
-            let mut k = [0 ;1];
+            let mut k = [0; 1];
             let (mut sp, mut sc) = UnixStream::pair()?;
             match unsafe { fork() }? {
                 ForkResult::Child => {
@@ -742,10 +742,9 @@ fn main() -> Result<()> {
                             serv.reload(&ctx).await?;
                             nw.1.restart(&serv, &ctx).await?;
                             nw.0.restart(&serv, &ctx).await?;
-                            sc.write_all(&[0])?;
                             graphs.close()?;
                         }
-
+                        sc.write_all(&[0])?;
                         let (conn, h, _) =
                             new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
                                 TokioSocket::from_raw_fd(fd)
