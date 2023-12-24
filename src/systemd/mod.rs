@@ -326,7 +326,6 @@ impl<'b> ItemRM for Socks2TUN<'b> {
 impl Systemd {
     fn new(paths: &PathState, conn: Option<zbus::Connection>, root: bool) -> Result<Self> {
         let path = paths.tun2proxy();
-        create_dir_all(&path)?;
         let base = directories::BaseDirs::new().unwrap();
         let systemd_unit = if root {
             "/etc/systemd/system".parse()?

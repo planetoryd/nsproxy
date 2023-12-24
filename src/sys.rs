@@ -235,13 +235,15 @@ impl<'p> UserNS<'p> {
     fn exist(&self) -> Result<bool> {
         let mut f = OpenOptions::new().read(true).open("/proc/self/mountinfo")?;
         let read = BufReader::new(&mut f);
-        let (u, p) = self.paths();
+        let (u, p) = self.paths()?;
+        let (mut ux, mut px) = Default::default();
         // They have to be UTF8 ?
         let (u, p) = (u.to_str().unwrap(), p.to_str().unwrap());
         for line in read.lines() {
             let line = line?;
-            let m = line.contains(u) || line.contains(p);
-            if m {
+            ux |= line.contains(u);
+            px |= line.contains(p);
+            if ux && px {
                 return Ok(true);
             }
         }
@@ -249,8 +251,8 @@ impl<'p> UserNS<'p> {
     }
     /// A process with euid being owner may enter the user NS without the cap
     fn init(&self, owner: uid_t) -> Result<()> {
-        let private = self.0.private();
-        create_dir_all(&private)?; // doesnt error when dir exists
+        let private = self.0.private(false)?;
+        // create_dir_all(&private)?; // doesnt error when dir exists
         mount(
             // CAP_SYS_ADMIN
             Some(&private),
@@ -263,7 +265,7 @@ impl<'p> UserNS<'p> {
         let mut att = MountAttr::default();
         att.propagation = MS_PRIVATE;
         unsafe { mount_setattr(AT_FDCWD, &private, 0, &att as *const _) }?;
-        let (user, mnt) = self.paths();
+        let (user, mnt) = self.paths()?;
         let _ = File::create(&mnt)?;
         let _ = File::create(&user)?;
 
@@ -305,7 +307,7 @@ impl<'p> UserNS<'p> {
 
                 mount(
                     Some(&puser),
-                    &self.0.user(),
+                    &self.0.user()?,
                     None::<&str>,
                     MsFlags::MS_BIND,
                     None::<&str>,
@@ -325,7 +327,7 @@ impl<'p> UserNS<'p> {
         Ok(())
     }
     fn deinit(&self) -> Result<()> {
-        let (user, mnt) = self.paths();
+        let (user, mnt) = self.paths()?;
         let private = mnt.parent().unwrap();
         if private.exists() {
             if let Err(k) = umount(private) {
@@ -360,12 +362,12 @@ impl<'p> UserNS<'p> {
         log::info!("UserNS deinited");
         Ok(())
     }
-    fn paths(&self) -> (PathBuf, PathBuf) {
-        (self.0.user(), self.0.private().join("mnt"))
+    fn paths(&self) -> Result<(PathBuf, PathBuf)> {
+        Ok((self.0.user()?, self.0.private(false)?.join("mnt")))
     }
     /// Generate a [ProcNS]
     fn procns(&self) -> Result<NSGroup<ExactNS>> {
-        let (user, mnt) = self.paths();
+        let (user, mnt) = self.paths()?;
         Ok(NSGroup {
             user: NSSlot::Provided(ExactNS::from_source(user)?, Default::default()),
             mnt: NSSlot::Provided(ExactNS::from_source(mnt)?, Default::default()),
@@ -435,7 +437,7 @@ unsafe fn mount_setattr(
 pub fn check_capsys() -> Result<()> {
     let caps = capctl::CapState::get_current().unwrap();
     if !caps.effective.has(capctl::Cap::SYS_ADMIN) {
-        bail!("requires CAP_SYS_ADMIN. Use `sudo nsproxy`");
+        bail!("requires CAP_SYS_ADMIN. Use sproxy");
     }
 
     Ok(())
@@ -482,6 +484,7 @@ pub fn cmd_uid(uid: Option<u32>, allow_root: bool) -> Result<()> {
     Ok(())
 }
 
+/// The program keeps a special uid in mind, called the non-root uid.
 pub fn what_uid(uid: Option<u32>, allow_root: bool) -> Result<u32> {
     if let Some(u) = uid {
         Ok(u)

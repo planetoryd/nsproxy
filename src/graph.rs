@@ -3,7 +3,7 @@
 //! Prevent proxy loops, and have a registry of NSes,
 //! Processes are managed by systemd.
 
-use std::{io::Read, path::PathBuf};
+use std::{io::Read, path::PathBuf, os::unix::fs::chown};
 
 use super::*;
 use crate::{
@@ -98,10 +98,11 @@ impl Graphs {
         k.file = Some(file);
         Ok(k)
     }
-    pub fn dump_file(&self, path: &PathState) -> Result<()> {
+    pub fn dump_file(&self, path: &PathState, wuid: u32) -> Result<()> {
         let pa = Self::path(path);
         log::info!("Dump graphs to {:?}", &pa);
         let file = std::fs::File::create(&pa)?;
+        chown(&pa, Some(wuid), None)?;
         serde_json::to_writer_pretty(&file, self)?;
         Ok(())
     }

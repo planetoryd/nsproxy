@@ -662,64 +662,48 @@ impl Graphs {
     ) -> Result<(NSAddRes, NodeI)> {
         let ns = NSGroup::key_ident(pid)?;
         let uf = ns.unique;
+        let makenode = |ix| {
+            let mut node = match method {
+                NSAdd::RecordMountedPaths => {
+                    // Always try unmount
+                    NSGroup::umount(ix, paths, rootful)?;
+                    mount_ns_by_pid(pid, paths, ix, true, rootful)?
+                }
+                NSAdd::RecordProcfsPaths => NSGroup::proc_path(pid.to_n(), None)?,
+                NSAdd::RecordNothing => NSGroup::proc_path(pid, Some(NSSource::Unavail(false)))?,
+                NSAdd::Flatpak => {
+                    let mut g = NSGroup::default();
+                    // Prevents entering by setting to unavail
+                    assign!(g, [pid, mnt], proc_path, pid, Some(NSSource::Unavail(true)));
+                    assign!(g, [net, uts], proc_path, pid, None);
+                    g.user = g.net.user_ns_slot()?;
+                    g
+                }
+            };
+            if let Some(p) = usermnt {
+                node += p;
+            }
+            if let Some(ref na) = name {
+                self.name.insert(na.clone(), ix);
+            }
+            anyhow::Ok(ObjectNode {
+                name,
+                main: node,
+                root: rootful,
+            })
+        };
         match self.map.entry(uf) {
             hash_map::Entry::Occupied(en) => {
                 let ns = *en.get();
                 log::info!("NS object {pid:?} {:?} exists", ns);
-                let node = match method {
-                    NSAdd::RecordProcfsPaths => Some(NSGroup::proc_path(pid.to_n(), None)?),
-                    _ => None,
-                };
-                if let Some(mut node) = node {
-                    if let Some(p) = usermnt {
-                        node += p;
-                    }
-                    if let Some(ref na) = name {
-                        self.name.insert(na.clone(), ns);
-                    }
-                    self.data[ns].replace(ObjectNode {
-                        name,
-                        main: node,
-                        root: rootful,
-                    });
-                    log::info!("Updated NS node");
-                }
-
+                self.data[ns].replace(makenode(ns)?);
+                log::info!("Updated NS node");
                 Ok((NSAddRes::Found, ns))
             }
             hash_map::Entry::Vacant(va) => {
                 let ix: NodeI = self.data.add_node(None);
                 log::info!("New NS object {pid:?}, {:?}", ix);
-                let mut node = match method {
-                    NSAdd::RecordMountedPaths => {
-                        // Always try unmount
-                        NSGroup::umount(ix, paths, rootful)?;
-                        mount_ns_by_pid(pid, paths, ix, true, rootful)?
-                    }
-                    NSAdd::RecordProcfsPaths => NSGroup::proc_path(pid.to_n(), None)?,
-                    NSAdd::RecordNothing => {
-                        NSGroup::proc_path(pid, Some(NSSource::Unavail(false)))?
-                    }
-                    NSAdd::Flatpak => {
-                        let mut g = NSGroup::default();
-                        // Prevents entering by setting to unavail
-                        assign!(g, [pid, mnt], proc_path, pid, Some(NSSource::Unavail(true)));
-                        assign!(g, [net, uts], proc_path, pid, None);
-                        g.user = g.net.user_ns_slot()?;
-                        g
-                    }
-                };
-                if let Some(p) = usermnt {
-                    node += p;
-                }
-                if let Some(ref na) = name {
-                    self.name.insert(na.clone(), ix);
-                }
-                self.data[ix].replace(ObjectNode {
-                    name,
-                    main: node,
-                    root: rootful,
-                });
+                self.data[ix].replace(makenode(ix)?);
                 Ok((NSAddRes::NewNS, *va.insert(ix)))
             }
         }

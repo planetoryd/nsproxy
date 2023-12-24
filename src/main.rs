@@ -113,15 +113,6 @@ enum Commands {
     TUN2proxy {
         conf: PathBuf,
     },
-    /// Requires root or equivalent.
-    /// Initiatializes user and mount namespaces.
-    /// Actions other than this may be performed (also usually) rootlessly
-    /// It's recommend to use SUDO because I need the deprivileged UID
-    Init {
-        /// Deinit
-        #[arg(long, short)]
-        undo: bool,
-    },
     Info,
     /// Enter the initialized user&mnt ns
     Userns {
@@ -132,6 +123,8 @@ enum Commands {
         uid: Option<u32>,
         #[arg(long, short, value_parser=parse_node)]
         node: Option<NodeAddr>,
+        #[arg(long, short)]
+        deinit: bool,
     },
     Node {
         #[arg(value_parser=parse_node)]
@@ -256,7 +249,7 @@ fn main() -> Result<()> {
                         if !paths.userns().exist()? {
                             println!(
                                 "User NS does not exist. Create it as root with command {}",
-                                "nsproxy init".bright_yellow()
+                                "sproxy userns".bright_yellow()
                             );
                             exit(-1);
                         }
@@ -329,7 +322,6 @@ fn main() -> Result<()> {
                     }
                 }
             }; // Source of TUNFD/SocketFD
-            assert_eq!(r, NSAddRes::NewNS);
 
             rt.block_on(async move {
                 graphs.clear_ns(src, &serv).await?;
@@ -361,7 +353,7 @@ fn main() -> Result<()> {
                     .write((Layer::L3, Some(pspath.clone())), &serv)
                     .await?;
                 graphs.data[edge].replace(rel);
-                graphs.dump_file(&paths)?;
+                graphs.dump_file(&paths, uid)?;
                 let nw = graphs.nodewdeps(src)?;
 
                 nw.write(Some(pspath.clone()), &serv).await?;
@@ -519,7 +511,7 @@ fn main() -> Result<()> {
                             .write((Layer::L3, Some(pspath.clone())), &serv)
                             .await?;
                         graphs.data[edge].replace(rel);
-                        graphs.dump_file(&paths)?;
+                        graphs.dump_file(&paths, uid)?;
                         serv.reload(&ctx).await?;
                         let nw = graphs.nodewdeps(src)?;
                         nw.write(Some(pspath.clone()), &serv).await?;
@@ -534,32 +526,15 @@ fn main() -> Result<()> {
                 aok!()
             })?;
         }
-        Commands::Init { undo } => {
-            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, false)?)?;
+        Commands::Userns {
+            rmall,
+            uid,
+            node,
+            deinit,
+        } => {
+            let wuid = what_uid(None, false)?;
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(wuid)?;
             let paths: Paths = paths.into();
-            let usern = UserNS(&paths);
-            check_capsys()?;
-            paths.create_dirs_priv()?;
-            if undo {
-                usern.deinit()?;
-                std::fs::remove_file(Graphs::path(&paths))?;
-            } else {
-                if usern.exist()? {
-                    log::error!("UserNS has already been initialized");
-                } else {
-                    let mut graphs = Graphs::load_file(&paths)?;
-                    let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-                    let owner = what_uid(None, false)?;
-                    usern.init(owner)?;
-                    graphs.dump_file(&paths)?;
-                    log::info!("{:?}", usern.paths());
-                }
-            }
-        }
-        Commands::Userns { rmall, uid, node } => {
-            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, false)?)?;
-            let paths: Paths = paths.into();
-
             let usern = UserNS(&paths);
             let rootful = geteuid().is_root();
             if usern.exist()? {
@@ -567,6 +542,8 @@ fn main() -> Result<()> {
                 usern.procns()?.enter(&ctx)?;
                 if rmall {
                     NSGroup::rmall(&paths, false)?;
+                } else if deinit {
+                    usern.deinit()?;
                 } else {
                     // This process gains full caps after setns, so we can do whatever.
                     if let Some(uid) = uid {
@@ -579,7 +556,9 @@ fn main() -> Result<()> {
                     cmd.spawn()?.wait()?;
                 }
             } else {
-                log::error!("UserNS does not exist");
+                log::warn!("UserNS does not exist");
+                check_capsys()?;
+                usern.init(wuid)?;
             }
         }
         Commands::Node { id, op } => {
@@ -685,7 +664,7 @@ fn main() -> Result<()> {
                         let rootful = geteuid().is_root();
                         let mut serv = systemd::Systemd::new(&paths, None, rootful)?;
                         rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
-                        graphs.dump_file(&paths)?;
+                        graphs.dump_file(&paths, what_uid(None, true)?)?;
                     }
                 }
             } else {
@@ -717,7 +696,8 @@ fn main() -> Result<()> {
             cmd,
             mut tun2proxy,
         } => {
-            let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
+            let wuid = what_uid(None, true)?;
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(wuid)?;
             let paths: Paths = paths.into();
             // sysctl net.ipv4.ip_forward=1
             let mut graphs = Graphs::load_file(&paths)?;
@@ -857,14 +837,14 @@ fn main() -> Result<()> {
                                 .write((Layer::L3, Some(pspath.clone())), &serv)
                                 .await?;
                             graphs.data[edge].replace(rel);
-                            graphs.dump_file(&paths)?;
+                            graphs.dump_file(&paths, wuid)?;
                             let nw = graphs.nodewdeps(src)?;
                             nw.write(Some(pspath.clone()), &serv).await?;
                             serv.reload(&ctx).await?;
                             nw.1.restart(&serv, &ctx).await?;
                             nw.0.restart(&serv, &ctx).await?;
                         } else {
-                            graphs.dump_file(&paths)?;
+                            graphs.dump_file(&paths, wuid)?;
                         }
                         sp.write_all(&[0])?;
                         drop(graphs);
