@@ -429,7 +429,6 @@ fn main() -> Result<()> {
             let fdx = unsafe { UnixListener::from_raw_fd(fdx.into_raw_fd()) };
             log::info!("Waiting for device FD");
             let (conn, _addr) = fdx.accept()?;
-            let mut k = [0; 1];
             let devfd = conn.recv_fd()?;
             log::info!("Got FD");
             let mut cf = File::open(&conf)?;

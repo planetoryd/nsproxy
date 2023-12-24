@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 use daggy::NodeIndex;
-use netlink_ops::netlink::{LinkAB, NLDriver, nl_ctx};
+use netlink_ops::netlink::{nl_ctx, LinkAB, NLDriver};
 use nsproxy_common::ExactNS;
 use systemd_zbus::{ManagerProxy, Mode::Replace};
 use tun::Layer;
@@ -21,7 +21,7 @@ use zbus::Address;
 
 use super::*;
 use crate::{
-    data::{EdgeI, FDRecver, Ix, NodeI, ObjectNode, PassFD, Relation, NSGroup},
+    data::{EdgeI, FDRecver, Ix, NSGroup, NodeI, ObjectNode, PassFD, Relation},
     managed::{
         IRelation, Indexed, ItemAction, ItemCreate, ItemRM, MItem, NDeps, NodeIndexed, NodeWDeps,
         ServiceM, Socks2TUN,
@@ -122,9 +122,15 @@ pub fn units(ve: &NDeps<'_>) -> Result<HashSet<String>> {
             _ => continue,
         };
         match re {
-            FDRecver::Systemd(se) => units.insert(se.to_owned()),
-            FDRecver::TUN2Proxy(pa) => units.insert(Socks2TUN::new(&pa, edge.id)?.service()?),
-            _ => false,
+            FDRecver::Systemd(se) => {
+                units.insert(se.to_owned());
+            }
+            FDRecver::TUN2Proxy(pa) => {
+                let socks2 = Socks2TUN::new(&pa, edge.id)?;
+                units.insert(socks2.service()?);
+                units.insert(socks2.sockunit()?);
+            }
+            _ => (),
         };
     }
     Ok(units)
