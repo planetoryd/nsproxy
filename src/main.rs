@@ -69,6 +69,8 @@ use tun::{AsyncDevice, Configuration, Device, Layer};
     about = "an alternative to proxychains based on linux kernel namespaces"
 )]
 struct Cli {
+    #[arg(long, short)]
+    log: Option<Level>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -199,7 +201,7 @@ fn main() -> Result<()> {
 
     let subscriber = FmtSubscriber::builder()
         .compact()
-        .with_max_level(Level::INFO)
+        .with_max_level(cli.log.unwrap_or(Level::INFO))
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
     LogTracer::init()?;
@@ -218,7 +220,7 @@ fn main() -> Result<()> {
         } => {
             let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
             let paths: Paths = paths.into();
-            
+
             let mut graphs = Graphs::load_file(&paths)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -282,6 +284,7 @@ fn main() -> Result<()> {
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
+                        prctl::set_pdeathsig(Some(SIGTERM))?;
                         unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                         sc.write_all(&[0])?;
                         sethostname("proxied")?;
@@ -304,7 +307,7 @@ fn main() -> Result<()> {
                         // TODO: crash test, and make sure child process doesnt get broken pipe.
                         // Alternatively kill child processes.
                         // let mut cmd: tokio::process::Command = cmd.into();
-                        prctl::set_pdeathsig(Some(SIGTERM))?;
+
                         sc.read_exact(&mut buf)?;
                         let mut ch = cmd.spawn()?;
                         ch.wait()?;
@@ -329,6 +332,8 @@ fn main() -> Result<()> {
             assert_eq!(r, NSAddRes::NewNS);
 
             rt.block_on(async move {
+                graphs.clear_ns(src, &serv).await?;
+
                 let (out_ix, edge) = if let Some(out) = &out {
                     let out = graphs.resolve(out)?;
                     (out, graphs.data.add_edge(src, out, None))
@@ -363,7 +368,6 @@ fn main() -> Result<()> {
                 serv.reload(&ctx).await?;
                 nw.1.restart(&serv, &ctx).await?;
                 nw.0.restart(&serv, &ctx).await?;
-                graphs.close()?;
                 aok!()
             })?;
             sp.write_all(&[2])?;
@@ -425,7 +429,8 @@ fn main() -> Result<()> {
             let fdx = unsafe { UnixListener::from_raw_fd(fdx.into_raw_fd()) };
             log::info!("Waiting for device FD");
             let (conn, _addr) = fdx.accept()?;
-            let devfd: RawFd = conn.recv_fd()?;
+            let mut k = [0; 1];
+            let devfd = conn.recv_fd()?;
             log::info!("Got FD");
             let mut cf = File::open(&conf)?;
             let mut args: tun2socks5::IArgs = serde_json::from_reader(&mut cf)?;
@@ -434,7 +439,7 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             rt.block_on(async {
-                let dev = tun::platform::linux::Device::from_raw_fd(devfd, &devconf)?;
+                let dev = tun::platform::linux::Device::from_raw_fd(devfd.as_raw_fd(), &devconf)?;
                 if let Some(ref mut p) = args.state {
                     let mut f = p.file_name().unwrap().to_owned();
                     let netns = ExactNS::from_source((PidPath::Selfproc, "net"))?;
@@ -521,8 +526,6 @@ fn main() -> Result<()> {
                         nw.write(Some(pspath.clone()), &serv).await?;
                         nw.1.restart(&serv, &ctx).await?;
                         nw.0.restart(&serv, &ctx).await?;
-
-                        graphs.close()?;
                     }
 
                     aok!()
@@ -726,22 +729,24 @@ fn main() -> Result<()> {
             let (mut sp, mut sc) = UnixStream::pair()?;
             match unsafe { fork() }? {
                 ForkResult::Child => {
+                    drop(sp);
+                    prctl::set_pdeathsig(Some(SIGTERM))?;
                     unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                     sethostname("proxied")?;
                     enable_ping_all()?;
                     let nl = Socket::new(NETLINK_ROUTE)?;
-                    nl.set_non_blocking(true)?;
+                    // nl.set_non_blocking(true)?;
                     sc.send_fd(nl.as_raw_fd())?;
                     cmd_uid(uid, true)?;
-                    // sp.write_all(&[0])?;
-                    prctl::set_pdeathsig(Some(SIGTERM))?;
                     log::info!("In-netns process, {:?} (fork child)", getpid());
                     let mut cmd =
                         Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
-                    sp.read_exact(&mut k)?;
+                    log::info!("Wait parent process to finish configuration");
+                    sc.read_exact(&mut k)?;
                     cmd.spawn()?.wait()?;
                 }
                 ForkResult::Parent { child } => {
+                    drop(sc);
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()?;
@@ -749,6 +754,9 @@ fn main() -> Result<()> {
                         let rootful = geteuid().is_root();
                         let fd = sp.recv_fd()?;
                         let mut veth_key: Option<VPairKey> = None;
+                        let pre = systemd_connection(rootful).await?;
+                        let serv = systemd::Systemd::new(&paths, Some(pre), true)?;
+
                         let (_, src) = graphs.add_ns(
                             PidPath::N(child.as_raw()),
                             &paths,
@@ -765,26 +773,31 @@ fn main() -> Result<()> {
                             None,
                             rootful,
                         )?;
+                        graphs.clear_ns(src, &serv).await?;
                         if let Some(ref _p) = tun2proxy {
                             veth_key =
                                 Some(format!("v{}to{}", src.index(), out.index()).try_into()?);
                         }
-                        let (conn, h, _) =
+                        log::info!("Connect to netlink");
+                        let (nl_ch_conn, handle_ch, _) =
                             new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
                                 TokioSocket::from_raw_fd(fd)
                             });
-                        rt.spawn(conn);
-                        let h = NLHandle::new(
-                            Handle::new(h),
+                        tokio::spawn(nl_ch_conn);
+                        let nlh_ch = NLHandle::new(
+                            Handle::new(handle_ch),
                             ExactNS::from_source((
                                 nsproxy_common::PidPath::N(child.as_raw()),
                                 "net",
                             ))?,
                         );
-                        let mut nl_ch = NLDriver::new(h);
+                        let mut nl_ch = NLDriver::new(nlh_ch);
                         let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-                        nl_ch.fill().await?;
+                        log::info!("Fetch netlink");
                         nl.fill().await?;
+                        log::info!("Fetch netlink (child process)");
+                        nl_ch.fill().await?;
+                        log::info!("Netlink fetched");
                         let mut addrset: HashSet<IpNetwork> = HashSet::default(); // find unused subnet
                         {
                             nl_ctx!(link, conn, nl_ch);
@@ -839,9 +852,7 @@ fn main() -> Result<()> {
                         graphs.data[edge].replace(Relation::Veth(vc));
                         if let Some(tun2proxy) = tun2proxy {
                             let edge = graphs.data.add_edge(src, out, None);
-                            let pre = systemd_connection(rootful).await?;
                             let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                            let serv = systemd::Systemd::new(&paths, Some(pre), true)?;
                             let ctx = serv.ctx().await?;
                             let rel = socks2t
                                 .write((Layer::L3, Some(pspath.clone())), &serv)
@@ -856,10 +867,8 @@ fn main() -> Result<()> {
                         } else {
                             graphs.dump_file(&paths)?;
                         }
-                        sc.write_all(&[0])?;
-
-                        graphs.close()?;
-
+                        sp.write_all(&[0])?;
+                        drop(graphs);
                         aok!()
                     })?;
                     waitpid(Some(Pid::from_raw(-1)), None)?;

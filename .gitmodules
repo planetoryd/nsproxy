@@ -1,6 +1,6 @@
 [submodule "rust-tun"]
 	path = rust-tun
-	url = https://github.com/meh/rust-tun
+	url = https://github.com/planetoryd/rust-tun
 [submodule "netlink-ops"]
 	path = netlink-ops
 	url = https://github.com/planetoryd/netlink-ops

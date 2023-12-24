@@ -9,7 +9,11 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{paths::PathState, sys::NSEnter};
+use crate::{
+    managed::{ItemRM, NodeWDeps},
+    paths::PathState,
+    sys::NSEnter,
+};
 
 use super::*;
 use anyhow::{anyhow, bail};
@@ -662,6 +666,25 @@ impl Graphs {
             hash_map::Entry::Occupied(en) => {
                 let ns = *en.get();
                 log::info!("NS object {pid:?} {:?} exists", ns);
+                let node = match method {
+                    NSAdd::RecordProcfsPaths => Some(NSGroup::proc_path(pid.to_n(), None)?),
+                    _ => None,
+                };
+                if let Some(mut node) = node {
+                    if let Some(p) = usermnt {
+                        node += p;
+                    }
+                    if let Some(ref na) = name {
+                        self.name.insert(na.clone(), ns);
+                    }
+                    self.data[ns].replace(ObjectNode {
+                        name,
+                        main: node,
+                        root: rootful,
+                    });
+                    log::info!("Updated NS node");
+                }
+
                 Ok((NSAddRes::Found, ns))
             }
             hash_map::Entry::Vacant(va) => {
@@ -715,6 +738,23 @@ impl Graphs {
                 .ok_or(anyhow!("specified UniqueFile has no associated node"))
                 .map(|k| *k),
         }
+    }
+    /// It was supposed to be a new NS, but we find that it exists
+    async fn clear_ns<S>(&mut self, src: NodeI, serv: &S) -> Result<()>
+    where
+        for<'a, 'b> NodeWDeps<'a, 'b>: ItemRM<Serv = S>,
+    {
+        log::info!("Clear NS {:?}", src);
+        let nw = self.nodewdeps(src)?;
+        nw.remove(serv).await?;
+        let mut edges_rm: Vec<_> = Default::default();
+        for rel in nw.1 {
+            edges_rm.push(rel.edge.id);
+        }
+        for id in edges_rm {
+            self.data.remove_edge(id);
+        }
+        Ok(())
     }
 }
 

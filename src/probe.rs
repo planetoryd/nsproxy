@@ -1,9 +1,12 @@
 //! Pass TUNTAP / TCP socket FDs to proxies, and the creation thereof
 
-use std::{os::{
-    fd::{AsRawFd, RawFd},
-    unix::net::UnixStream,
-}, io::Write};
+use std::{
+    io::Write,
+    os::{
+        fd::{AsRawFd, RawFd, BorrowedFd, AsFd},
+        unix::net::UnixStream,
+    }, borrow::Borrow,
+};
 
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockProtocol, SockType};
 use passfd::FdPassingExt;
@@ -49,7 +52,7 @@ impl PassFD<TUNC> {
         dev.persist()?;
 
         assert!(dev.has_packet_information());
-        self.connect_and_pass(&dev)?;
+        self.connect_and_pass(dev.as_fd())?;
         Ok(())
     }
 }
@@ -62,14 +65,14 @@ impl PassFD<SocketC> {
             SockFlag::SOCK_CLOEXEC,
             SockProtocol::Tcp,
         )?;
-        self.connect_and_pass(&sock)?;
+        self.connect_and_pass(sock.as_fd())?;
 
         Ok(())
     }
 }
 
 impl<K> PassFD<K> {
-    pub fn connect_and_pass(&self, fd: &impl AsRawFd) -> Result<()> {
+    pub fn connect_and_pass(&self, fd: BorrowedFd) -> Result<()> {
         log::info!("connect {:?}", &self.listener);
         let conn = UnixStream::connect(&self.listener)?;
         conn.send_fd(fd.as_raw_fd())?;

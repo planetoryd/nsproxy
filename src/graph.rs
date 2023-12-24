@@ -36,8 +36,6 @@ impl Graphs {
     {
         let ctx = NSGroup::proc_path(Selfproc, None)?;
         let mut remove = Vec::new();
-        // let mut wh = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-        // wh.fill().await?;
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
                 let rx = k.main.net.validate(va, &ctx);
@@ -73,7 +71,7 @@ impl Graphs {
     pub fn load_file(path: &PathState) -> Result<Self> {
         let gp = Self::path(path);
         info!("Load graphs from {:?}", &gp);
-        let mut thing: Option<Self> = None; 
+        let mut thing: Option<Self> = None;
         let file = if gp.exists() {
             let mut file = std::fs::File::open(&gp)?;
             file.try_lock_exclusive()
@@ -83,6 +81,8 @@ impl Graphs {
             let k = Self::load(&st);
             if let Ok(stuff) = k {
                 thing = Some(stuff)
+            } else if st.trim().is_empty() {
+                // Ignore
             } else {
                 log::warn!("Corrupted state file. Reset");
             }
@@ -94,16 +94,9 @@ impl Graphs {
                 .map_err(|_| anyhow!("State file locked"))?;
             f
         };
-        Ok(Graphs {
-            file: Some(file),
-            ..thing.unwrap_or_default()
-        })
-    }
-    pub fn close(self) -> Result<()> {
-        if let Some(ref f) = self.file {
-            f.unlock()?;
-        }
-        Ok(())
+        let mut k = thing.unwrap_or_default();
+        k.file = Some(file);
+        Ok(k)
     }
     pub fn dump_file(&self, path: &PathState) -> Result<()> {
         let pa = Self::path(path);
@@ -114,5 +107,13 @@ impl Graphs {
     }
     pub fn path(path: &PathState) -> PathBuf {
         path.state.join("graphs.json")
+    }
+}
+
+impl Drop for Graphs {
+    fn drop(&mut self) {
+        if let Some(ref f) = self.file {
+            f.unlock().unwrap();
+        }
     }
 }

@@ -25,6 +25,7 @@ use xdg;
 #[public]
 #[derive(Debug, Serialize, Deserialize)]
 struct PathState {
+    /// Should persist
     config: PathBuf,
     /// We need to make sure the paths of .binds are exclusively used by user NS (if its used)
     /// If regular mounts get here problems will happen
@@ -115,7 +116,9 @@ impl PathState {
     }
     fn create_dirs(&self) -> Result<()> {
         create_dir_all(&self.config)?;
-        create_dir_all(self.binds()?)?;
+        if let Ok(user) = self.binds() {
+            create_dir_all(user)?;
+        }
         create_dir_all(&self.state)?;
         Ok(())
     }
@@ -142,7 +145,7 @@ impl PathState {
         UserNS(&self)
     }
     fn tun2proxy(&self) -> PathBuf {
-        self.config.join("tun2proxy")
+        self.state.join("tun2proxy_sock")
     }
     fn flatpak(&self) -> PathBuf {
         self.config.join("flatpak.json")
