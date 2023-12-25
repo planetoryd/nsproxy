@@ -1,7 +1,7 @@
 //! Misc low-level code
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env::var,
     ffi::{CStr, CString},
     fs::{
@@ -20,7 +20,13 @@ use std::{
 
 use anyhow::{bail, ensure};
 use daggy::NodeIndex;
+use id_alloc::NetRange;
+use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use libc::{pid_t, stat, syscall, uid_t};
+use netlink_ops::{
+    netlink::{nl_ctx, NLDriver, VPairKey, VethConn, NLHandle},
+    state::{Existence, ExpCollection},
+};
 use tracing::info;
 use zbus::Connection;
 
@@ -542,4 +548,69 @@ pub async fn systemd_connection(root: bool) -> Result<Connection> {
         zbus::Connection::session().await?
     };
     Ok(z)
+}
+
+pub async fn connect_ns_veth(
+    nl_ch: NLHandle,
+    nl: NLHandle,
+    mut veth_key: Option<VPairKey>,
+) -> Result<VethConn> {
+    let mut nl_ch = NLDriver::new(nl_ch);
+    let mut nl = NLDriver::new(nl);
+    log::info!("Fetch netlink");
+    nl.fill().await?;
+    log::info!("Fetch netlink (child process)");
+    nl_ch.fill().await?;
+    log::info!("Netlink fetched");
+    let mut addrset: HashSet<IpNetwork> = HashSet::default(); // find unused subnet
+    {
+        nl_ctx!(link, conn, nl_ch);
+        conn.set_up(link.map.get_mut(&"lo".parse()?).unwrap().exist_mut()?)
+            .await?;
+    }
+    {
+        nl_ctx!(link, conn, nl);
+        for (k, ex) in link.map {
+            if let Existence::Exist(li) = ex {
+                match &li.addrs {
+                    ExpCollection::Filled(addr) => {
+                        addrset.extend(addr.keys().into_iter());
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+    let (p4, p6) = (30, 126);
+    let (mut v4, mut v6, h4, h6) = id_alloc::from_ipnet(&addrset, p4, p6);
+    let dom4: Ipv4Network = "100.67.0.0/16".parse()?;
+    let r4 = dom4.range(h4);
+    let dom6: Ipv6Network = "fe80:2e::/24".parse()?;
+    let r6 = dom6.range(h6);
+    let net4: Ipv4Network = v4.alloc_or(&r4)?.try_into()?;
+    let net6: Ipv6Network = v6.alloc_or(&r6)?.try_into()?;
+    let n6: [_; 2] = net6.iter().next_chunk().unwrap();
+    let n6net: [_; 2] = n6.try_map(|n| Ipv6Network::new(n, p6))?.map(|n| n.into());
+    let mask = (!0 >> dom4.prefix()) & net4.mask().to_bits();
+    let num = (net4.ip().to_bits() & mask) >> h4;
+    if veth_key.is_none() {
+        veth_key = Some(format!("nsproxy{}", num).try_into()?);
+    }
+    let vc = VethConn {
+        subnet_veth: net4.into(),
+        subnet6_veth: net6.into(),
+        ip_va: Ipv4Network::new(net4.nth(0).unwrap(), p4)?.into(),
+        ip_vb: Ipv4Network::new(net4.nth(1).unwrap(), p4)?.into(),
+        ip6_va: n6net[0],
+        ip6_vb: n6net[1],
+        key: veth_key.unwrap(),
+    };
+    // let edge = graphs.data.add_edge(src, out, None);
+    vc.apply(&mut nl_ch, &mut nl).await?;
+    let mut nl_ch = NLDriver::new(nl_ch.conn);
+    let mut nl = NLDriver::new(nl.conn);
+    nl_ch.fill().await?;
+    nl.fill().await?;
+    vc.apply_addr_up(&mut nl_ch, &mut nl).await?;
+    Ok(vc)
 }

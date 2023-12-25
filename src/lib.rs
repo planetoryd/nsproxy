@@ -8,6 +8,8 @@
 #![feature(iterator_try_collect)]
 #![feature(error_generic_member_access)]
 #![feature(ip_bits)]
+#![feature(iter_next_chunk)]
+#![feature(array_try_map)]
 
 pub mod data;
 pub mod flatpak;
