@@ -583,6 +583,7 @@ fn main() -> Result<()> {
                             .ok_or(anyhow!("Specified node does not exist"))?
                             .as_ref() // Second one is an invariant
                             .unwrap();
+                        drop(graphs);
                         let mut va = VaCache::default();
                         let mut nss = NSState {
                             target: &node.main,

@@ -6,10 +6,12 @@ Kernel-namespaces-based alternative to proxychains.
 
 ## Usage 
 
-It's recommended to use the veth + tun2proxy method. The TUN2proxy and its tcp stack isn't well optimized. It acts as a compatibility layer for non-socks5-supporting apps.
+It's recommended to use the veth + tun2proxy method. 
 
 ```bash
-sudo ./setsuid.sh # set sproxy to be SUID
+./nsproxy install -s # installs nsproxy and sproxy to your /usr/local (requires root) and makes sproxy suid
+# it assumes sproxy is in the same directory as its nsproxy binary
+# even though sproxy is SUID, it still runs SUDO to check your permission
 sproxy veth -t ./test_proxy.json # gives you a shell inside a proxied container
 # later you may
 sproxy node <index> run # enter that container from another shell
@@ -32,8 +34,8 @@ sproxy node <index> run # enter that container from another shell
 ## The usecase
 
 - You use non-conventional protocols. You need userspace TUNs.
-- You have a diverse need for proxied routing, and you don't want to read a ton of docs.
 - You want to have some apps proxied, and others not.
+- You have a diverse need for proxied routing, and you don't want to read a ton of docs.
 - You don't want to mess with other parts of your system. 
 - You want to proxy Flatpak apps.
 
@@ -43,8 +45,8 @@ Root or not
 
 - `sproxy` requires root but less trouble
     - connects the container to your root/initial netns through veth (max performance)
-    - `sproxy` is just a wrapper that starts `nsproxy` and can be made SUID.
-- `nsproxy init`
+    - `sproxy` is just a wrapper that starts `nsproxy`.
+- `nsproxy userns`
     - initialises a user ns. This is a one-time operation, it just mounts them
     - It's possible to not mount the NS and have a long-running process, but it's not implemented
 - `nsproxy socks2tun --new-userns`
@@ -52,7 +54,7 @@ Root or not
 
 The proxy 
 
-- The current recommended usage is `sproxy veth`
+- The current recommended usage is `sproxy veth -t <config>`
     - Provides a TUN for non-socks5-capable programs
     - Provides a veth to your root net ns to access your proxies
 - If your proxy client is opensourced, it can be made to accept a socket from nsproxy
@@ -65,7 +67,7 @@ The app
 - If your app doesn't work with SOCKS5
     - If your app works with LD_PRELOAD, you don't need a TUN.
         - You may use proxychains inside an Nsproxy container
-        - Nsproxy creates a SOCKS5 endpoint in the container
+        - Nsproxy creates a SOCKS5 endpoint in the container that is passed to the proxy
     - Nsproxy may create a TUN and pass it to the proxy
     - Nsproxy may create a TUN and route it to the proxy's SOCKS5 endpoint
 - If your app works with SOCKS5
