@@ -1,4 +1,5 @@
 #![feature(decl_macro)]
+#![feature(async_closure)]
 #![feature(iter_next_chunk)]
 #![feature(array_try_map)]
 #![feature(ip_bits)]
@@ -37,6 +38,7 @@ use nsproxy::data::{
     PassFD, Relation, Validate, ValidateR, TUNC,
 };
 use nsproxy::flatpak::FlatpakID;
+use nsproxy::graph::{check_veths, FResult};
 use nsproxy::managed::{
     Indexed, ItemAction, ItemCreate, NodeIDPrint, NodeIndexed, NodeWDeps, ServiceM, Socks2TUN,
 };
@@ -77,25 +79,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// One of the many methods, use TUN2Proxy and pass a device FD to it.
-    /// TUN2proxy will connect to a SOCKS5 proxy in its NS, and serve a TUN in the app NS.
-    SOCKS2TUN {
+    New {
         #[arg(long, short)]
         pid: Option<pid_t>,
         /// Config file for Tun2proxy
         #[arg(long, short)]
-        tun2proxy: PathBuf,
+        tun2proxy: Option<PathBuf>,
         /// Command to run
         cmd: Option<String>,
         #[arg(long, short)]
         uid: Option<uid_t>,
         #[arg(long, short)]
         name: Option<String>,
-        /// Create a new user NS, instead of using an existing one.
-        #[arg(long)]
-        new_userns: bool,
+        /// Mount the new NS or not.
+        #[arg(long, short)]
+        mount: bool,
         #[arg(long, short, value_parser=parse_node)]
         out: Option<NodeAddr>,
+        #[arg(long, short)]
+        veth: bool,
     },
     /// Start as watcher daemon. This uses the socks2tun method.
     Watch {
@@ -131,16 +133,6 @@ enum Commands {
         id: Option<NodeAddr>,
         #[command(subcommand)]
         op: Option<NodeOps>,
-    },
-    /// You should use this through "sproxy" the SUID wrapper if you are not in a userns.
-    /// It tries to find an unallocated subnet, and the created NS is not registered in the state file.
-    Veth {
-        #[arg(long, short)]
-        uid: Option<u32>,
-        /// Command to run
-        cmd: Option<String>,
-        #[arg(long, short)]
-        tun2proxy: Option<PathBuf>,
     },
     Setns {
         pid: u32,
@@ -194,6 +186,7 @@ fn main() -> Result<()> {
 
     let subscriber = FmtSubscriber::builder()
         .compact()
+        .without_time()
         .with_max_level(cli.log.unwrap_or(Level::INFO))
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
@@ -202,14 +195,15 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     match cli.command {
-        Commands::SOCKS2TUN {
+        Commands::New {
             pid,
             mut tun2proxy,
             cmd,
             uid,
             name,
-            new_userns,
+            mount,
             out,
+            veth,
         } => {
             let (pspath, paths): (PathBuf, PathState) = PathState::load(what_uid(None, true)?)?;
             let paths: Paths = paths.into();
@@ -220,32 +214,44 @@ fn main() -> Result<()> {
                 .build()?;
             let capsys = check_capsys();
 
-            let uid = what_uid(uid, true)?;
-            let (pspath, paths): (PathBuf, PathState) = PathState::load(uid)?;
+            let wuid = what_uid(uid, true)?;
+            let (pspath, paths): (PathBuf, PathState) = PathState::load(wuid)?;
             let paths: Paths = paths.into();
 
-            tun2proxy = tun2proxy.canonicalize()?;
+            if let Some(ref mut tun2proxy) = tun2proxy {
+                *tun2proxy = tun2proxy.canonicalize()?;
+            }
             // Connect and authenticate to systemd before entering userns
             let rootful = geteuid().is_root();
             let pre = rt.block_on(async { systemd_connection(rootful).await })?;
-            let uns;
+            let priv_ns;
             let mut va = VaCache::default();
             let mut serv = systemd::Systemd::new(&paths, Some(pre), rootful)?;
-            rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
+            let mut rmnode = Default::default();
+
+            rt.block_on(async {
+                let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
+                let ctx = graphs.prune(&mut va, &mut serv, &mut rmnode, &mut nl).await?;
+                graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
+                aok!()
+            })?;
+
             let gid = getgid();
+            let mut depriv_userns = false;
             match capsys {
                 Ok(_) => {
                     // The user is using SUID or sudo, or we are alredy in a userns, or user did setcap.
                     // Probably intentional
-                    uns = Some(NSGroup::proc_path(
+                    priv_ns = Some(NSGroup::proc_path(
                         PidPath::Selfproc,
                         Some(NSSource::Unavail(false)),
                     )?);
                 }
                 _ => {
                     log::warn!("CAP_SYS_ADMIN not available, entering user NS (I assume you want to use UserNS)");
-                    if !new_userns {
-                        uns = Some(paths.userns().procns()?);
+                    if mount {
+                        // It only makes sense when we have a persistent userns to mount
+                        priv_ns = Some(paths.userns().procns()?);
                         if !paths.userns().exist()? {
                             println!(
                                 "User NS does not exist. Create it as root with command {}",
@@ -254,39 +260,61 @@ fn main() -> Result<()> {
                             exit(-1);
                         }
                         let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
-                        uns.as_ref().unwrap().enter(&ctx)?;
+                        priv_ns.as_ref().unwrap().enter(&ctx)?;
                         log::info!("Entered user, mnt NS");
                     } else {
-                        // let spid = getpid();
-                        uns = Some(unshare_user_standalone(uid, gid.as_raw())?);
+                        // Not mounting defaults to use a new userns
+                        priv_ns = Some(unshare_user_standalone(wuid, gid.as_raw())?);
+                        depriv_userns = true;
                     }
                     check_capsys()?;
                 }
             }
-            let ns_add = if new_userns {
-                NSAdd::RecordProcfsPaths
-            } else {
+            let ns_add = if mount {
                 NSAdd::RecordMountedPaths
+            } else {
+                NSAdd::RecordProcfsPaths
             };
-            rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
+            let mut rmnode = Default::default();
+            rt.block_on(async {
+                let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
+                let ctx = graphs
+                    .prune(&mut va, &mut serv, &mut rmnode, &mut nl)
+                    .await?;
+                graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
+                aok!()
+            })?;
+            // Prune is called twice because some NSes are visible only in userns
             let (mut sp, mut sc) = UnixStream::pair()?;
             let mut buf = [0; 1];
+            let mut nl_fd = None;
             // NS by Pid --send fd of TUN/socket--> NS of TUN2proxy
-            let (r, src) = if let Some(pid) = pid {
-                graphs.add_ns(PidPath::N(pid), &paths, uns.as_ref(), ns_add, name, rootful)?
+            let (src_res, src) = if let Some(pid) = pid {
+                graphs.add_ns(
+                    PidPath::N(pid),
+                    &paths,
+                    priv_ns.as_ref(),
+                    ns_add,
+                    name,
+                    rootful,
+                )?
             } else {
                 match unsafe { fork() }? {
                     ForkResult::Child => {
+                        drop(sp);
                         prctl::set_pdeathsig(Some(SIGTERM))?;
                         unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                         sc.write_all(&[0])?;
                         sethostname("proxied")?;
-                        if new_userns {
+                        if depriv_userns {
                             enable_ping_gid(gid)?
                         } else {
                             enable_ping_all()?;
                         }
-
+                        if veth {
+                            let nl = Socket::new(NETLINK_ROUTE)?;
+                            sc.send_fd(nl.as_raw_fd())?;
+                        }
                         sc.read_exact(&mut buf)?;
                         let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!(
                             "--cmd must be specified when --pid is not provided"
@@ -294,12 +322,7 @@ fn main() -> Result<()> {
                         // We don't change uid of this process.
                         // Otherwise probe might fail due to perms
                         cmd.current_dir(cwd);
-                        cmd.uid(uid);
-                        // NOTE: when parent process crashed, the child process fish shell got broken stdout and stderr
-                        // It probably dead looped on it and ate up the CPU.
-                        // TODO: crash test, and make sure child process doesnt get broken pipe.
-                        // Alternatively kill child processes.
-                        // let mut cmd: tokio::process::Command = cmd.into();
+                        cmd.uid(wuid);
 
                         sc.read_exact(&mut buf)?;
                         let mut ch = cmd.spawn()?;
@@ -307,11 +330,13 @@ fn main() -> Result<()> {
                         exit(0);
                     }
                     ForkResult::Parent { child } => {
+                        drop(sc);
                         sp.read_exact(&mut buf)?;
+                        nl_fd = if veth { Some(sp.recv_fd()?) } else { None };
                         let k = graphs.add_ns(
                             PidPath::N(child.as_raw()),
                             &paths,
-                            uns.as_ref(),
+                            priv_ns.as_ref(),
                             // We have no privs to mount with when new_userns==true
                             ns_add,
                             name,
@@ -326,36 +351,62 @@ fn main() -> Result<()> {
             rt.block_on(async move {
                 graphs.clear_ns(src, &serv).await?;
 
-                let (out_ix, edge) = if let Some(out) = &out {
-                    let out = graphs.resolve(out)?;
-                    (out, graphs.data.add_edge(src, out, None))
+                let out = if let Some(out) = &out {
+                    graphs.resolve(out)?
                 } else {
                     let (_, out) = graphs.add_ns(
                         PidPath::Selfproc,
                         &paths,
-                        uns.as_ref(),
+                        priv_ns.as_ref(),
                         NSAdd::RecordNothing,
                         None,
                         rootful,
                     )?;
-                    (out, graphs.data.add_edge(src, out, None))
+                    out
                 };
 
-                log::info!(
-                    "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
-                    graphs.data[src].as_ref().unwrap().main.key()
-                );
+                if let Some(tun2proxy) = tun2proxy {
+                    let edge = graphs.data.add_edge(src, out, None);
+                    log::info!(
+                        "Src/Probe {src:?} {}, OutNode(This process), Src --TUN--> Out {edge:?}",
+                        graphs.data[src].as_ref().unwrap().main.key()
+                    );
+                    let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
+                    let rel = socks2t
+                        .write((Layer::L3, Some(pspath.clone())), &serv)
+                        .await?;
+                    graphs.data[edge].replace(rel);
+                }
 
-                let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
+                let mut nl = NLHandle::new_self_proc_tokio()?;
+
+                if let Some(nl_fd) = nl_fd {
+                    let veth_key: Option<VPairKey>;
+                    veth_key = Some(format!("v{}to{}", src.index(), out.index()).try_into()?);
+                    let (nl_ch_conn, handle_ch, _) =
+                        new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
+                            TokioSocket::from_raw_fd(nl_fd)
+                        });
+                    tokio::spawn(nl_ch_conn);
+                    let mut nlh_ch = NLHandle::new(
+                        Handle::new(handle_ch),
+                        graphs.data[src]
+                            .as_ref()
+                            .unwrap()
+                            .main
+                            .net
+                            .must()?
+                            .to_owned(),
+                    );
+
+                    let vc = connect_ns_veth(nlh_ch, nl.clone(), veth_key).await?;
+                    let edge = graphs.data.add_edge(src, out, None);
+                    graphs.data[edge].replace(Relation::Veth(vc));
+                }
+
                 let ctx = serv.ctx().await?;
-                // TODO: TUN2proxy when TAP
-                let rel = socks2t
-                    .write((Layer::L3, Some(pspath.clone())), &serv)
-                    .await?;
-                graphs.data[edge].replace(rel);
-                graphs.dump_file(&paths, uid)?;
+                graphs.dump_file(&paths, wuid)?;
                 let nw = graphs.nodewdeps(src)?;
-
                 nw.write(Some(pspath.clone()), &serv).await?;
                 serv.reload(&ctx).await?;
                 nw.1.restart(&serv, &ctx).await?;
@@ -664,7 +715,15 @@ fn main() -> Result<()> {
                         let mut va = VaCache::default();
                         let rootful = geteuid().is_root();
                         let mut serv = systemd::Systemd::new(&paths, None, rootful)?;
-                        rt.block_on(async { graphs.prune(&mut va, &mut serv).await })?;
+                        let mut rmnode = Default::default();
+                        rt.block_on(async {
+                            let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
+                            let ctx = graphs
+                                .prune(&mut va, &mut serv, &mut rmnode, &mut nl)
+                                .await?;
+                            graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
+                            aok!()
+                        })?;
                         graphs.dump_file(&paths, what_uid(None, true)?)?;
                     }
                 }
@@ -690,114 +749,6 @@ fn main() -> Result<()> {
             match graphs {
                 Ok(g) => summarize_graph(&g)?,
                 Err(e) => println!("graphs not available, {:?}", e),
-            }
-        }
-        Commands::Veth {
-            uid,
-            cmd,
-            mut tun2proxy,
-        } => {
-            let wuid = what_uid(None, true)?;
-            let (pspath, paths): (PathBuf, PathState) = PathState::load(wuid)?;
-            let paths: Paths = paths.into();
-            // sysctl net.ipv4.ip_forward=1
-            let mut graphs = Graphs::load_file(&paths)?;
-            if let Some(ref mut tun2proxy) = tun2proxy {
-                *tun2proxy = tun2proxy.canonicalize()?;
-            }
-            let mut k = [0; 1];
-            let (mut sp, mut sc) = UnixStream::pair()?;
-            match unsafe { fork() }? {
-                ForkResult::Child => {
-                    drop(sp);
-                    prctl::set_pdeathsig(Some(SIGTERM))?;
-                    unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
-                    sethostname("proxied")?;
-                    enable_ping_all()?;
-                    let nl = Socket::new(NETLINK_ROUTE)?;
-                    // nl.set_non_blocking(true)?;
-                    sc.send_fd(nl.as_raw_fd())?;
-                    cmd_uid(uid, true)?;
-                    log::info!("In-netns process, {:?} (fork child)", getpid());
-                    let mut cmd =
-                        Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
-                    log::info!("Wait parent process to finish configuration");
-                    sc.read_exact(&mut k)?;
-                    cmd.spawn()?.wait()?;
-                }
-                ForkResult::Parent { child } => {
-                    drop(sc);
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?;
-                    rt.block_on(async {
-                        let rootful = geteuid().is_root();
-                        let fd = sp.recv_fd()?;
-                        let mut veth_key: Option<VPairKey> = None;
-                        let pre = systemd_connection(rootful).await?;
-                        let serv = systemd::Systemd::new(&paths, Some(pre), true)?;
-
-                        let (_, src) = graphs.add_ns(
-                            PidPath::N(child.as_raw()),
-                            &paths,
-                            None,
-                            NSAdd::RecordProcfsPaths,
-                            None,
-                            rootful,
-                        )?;
-                        let (_, out) = graphs.add_ns(
-                            PidPath::Selfproc,
-                            &paths,
-                            None,
-                            NSAdd::RecordNothing,
-                            None,
-                            rootful,
-                        )?;
-                        graphs.clear_ns(src, &serv).await?;
-                        if let Some(ref _p) = tun2proxy {
-                            veth_key =
-                                Some(format!("v{}to{}", src.index(), out.index()).try_into()?);
-                        }
-                        log::info!("Connect to netlink");
-                        let (nl_ch_conn, handle_ch, _) =
-                            new_connection_from_socket::<_, _, NetlinkCodec>(unsafe {
-                                TokioSocket::from_raw_fd(fd)
-                            });
-                        tokio::spawn(nl_ch_conn);
-                        let nlh_ch = NLHandle::new(
-                            Handle::new(handle_ch),
-                            ExactNS::from_source((
-                                nsproxy_common::PidPath::N(child.as_raw()),
-                                "net",
-                            ))?,
-                        );
-                        let vc = connect_ns_veth(nlh_ch, NLHandle::new_self_proc_tokio()?, veth_key)
-                            .await?;
-                        let edge = graphs.data.add_edge(src, out, None);
-                        graphs.data[edge].replace(Relation::Veth(vc));
-                        if let Some(tun2proxy) = tun2proxy {
-                            let edge = graphs.data.add_edge(src, out, None);
-                            let socks2t = Socks2TUN::new(&tun2proxy, edge)?;
-                            let ctx = serv.ctx().await?;
-                            let rel = socks2t
-                                .write((Layer::L3, Some(pspath.clone())), &serv)
-                                .await?;
-                            graphs.data[edge].replace(rel);
-                            graphs.dump_file(&paths, wuid)?;
-                            let nw = graphs.nodewdeps(src)?;
-                            nw.write(Some(pspath.clone()), &serv).await?;
-                            serv.reload(&ctx).await?;
-                            nw.1.restart(&serv, &ctx).await?;
-                            nw.0.restart(&serv, &ctx).await?;
-                        } else {
-                            graphs.dump_file(&paths, wuid)?;
-                        }
-                        sp.write_all(&[0])?;
-                        drop(graphs);
-                        aok!()
-                    })?;
-                    waitpid(Some(Pid::from_raw(-1)), None)?;
-                }
             }
         }
         Commands::Setns { pid, cmd, uid } => {

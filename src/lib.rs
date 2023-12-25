@@ -10,6 +10,8 @@
 #![feature(ip_bits)]
 #![feature(iter_next_chunk)]
 #![feature(array_try_map)]
+#![feature(impl_trait_in_fn_trait_return)]
+#![feature(async_closure)]
 
 pub mod data;
 pub mod flatpak;

@@ -2059,6 +2059,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "derivative",
+ "derive-new",
  "fully_pub",
  "indexmap 2.1.0",
  "libc",

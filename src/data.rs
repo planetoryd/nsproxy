@@ -177,7 +177,7 @@ pub type EdgeI = EdgeIndex<Ix>;
 #[public]
 #[derive(Derivative, Serialize, Deserialize, Debug)]
 #[derivative(Default(bound = ""))]
-struct NSGroup<N> {
+struct NSGroup<N = ExactNS> {
     mnt: NSSlot<N, NSMnt>,
     uts: NSSlot<N, NSUts>,
     net: NSSlot<N, NSNet>,

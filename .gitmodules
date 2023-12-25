@@ -1,33 +1,43 @@
 [submodule "rust-tun"]
 	path = rust-tun
 	url = https://github.com/planetoryd/rust-tun
+	branch = master
 [submodule "netlink-ops"]
 	path = netlink-ops
 	url = https://github.com/planetoryd/netlink-ops
+	branch = master
 [submodule "rtnetlink"]
 	path = rtnetlink
 	url = https://github.com/planetoryd/rtnetlink
+	branch = main
 [submodule "rustables"]
 	path = rustables
 	url = https://github.com/planetoryd/rustables
+	branch = netnsp
 [submodule "netlink-packet-audit"]
 	path = netlink-packet-audit
 	url = https://github.com/planetoryd/netlink-packet-audit
+	branch = main
 [submodule "netlink-sys"]
 	path = netlink-sys
 	url = https://github.com/planetoryd/netlink-sys
+	branch = main
 [submodule "netlink-proto"]
 	path = netlink-proto
 	url = https://github.com/planetoryd/netlink-proto
+	branch = main
 [submodule "tun2socks5"]
 	path = tun2socks5
 	url = https://github.com/planetoryd/tun2socks5
+	branch = master
 [submodule "socks5-impl"]
 	path = socks5-impl
 	url = https://github.com/planetoryd/socks5-impl
 [submodule "pidfd"]
 	path = pidfd
 	url = https://github.com/planetoryd/pidfd
+	branch = master
 [submodule "ipstack"]
 	path = ipstack
 	url = https://github.com/planetoryd/ipstack
+	branch = main

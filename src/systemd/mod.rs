@@ -41,23 +41,19 @@ pub struct Systemd {
 }
 
 impl<'b> MItem for Socks2TUN<'b> {
-    type Param = (Layer, Option<PathBuf>);
     type Serv = Systemd;
 }
 
 impl<'n, 'd> MItem for NodeWDeps<'n, 'd> {
-    type Param = Option<PathBuf>;
     type Serv = Systemd;
 }
 
 /// Represents the probe
 impl<'k> MItem for NodeIndexed<'k> {
-    type Param = ();
     type Serv = Systemd;
 }
 
 impl<'k> MItem for NDeps<'k> {
-    type Param = ();
     type Serv = Systemd;
 }
 
@@ -181,10 +177,7 @@ impl<'n, 'd> ItemRM for NodeWDeps<'n, 'd> {
         self.0.remove(serv).await?;
         for dep in self.1.iter() {
             match &dep.edge.item {
-                Relation::Veth(ve) => {
-                    // Nothing needs to be done.
-                    // If there is no process in an NS, it gets removed, and the veths get removed too
-                }
+                Relation::Veth(_ve) => {}
                 edge => {
                     if let Some(fdr) = edge.fd_recver() {
                         match fdr {
@@ -204,6 +197,7 @@ impl<'n, 'd> ItemRM for NodeWDeps<'n, 'd> {
 }
 
 impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
+    type Param = Option<PathBuf>;
     type Created = ();
     async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created> {
         let place = &self.0;
@@ -245,6 +239,7 @@ impl<'n, 'd> ItemCreate for NodeWDeps<'n, 'd> {
 }
 
 impl<'b> ItemCreate for Socks2TUN<'b> {
+    type Param = (Layer, Option<PathBuf>);
     type Created = Relation;
     async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created> {
         let sunit = serv.systemd_unit.join(self.sockunit()?);

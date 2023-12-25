@@ -40,6 +40,7 @@ pub type NodeIndexed<'k> = Indexed<NodeI, &'k ObjectNode>;
 pub type NDeps<'k> = Vec<IRelation<'k>>;
 pub type NodeWDeps<'n, 'd> = (NodeIndexed<'n>, NDeps<'d>);
 #[public]
+#[derive(Clone, Copy)]
 pub struct IRelation<'k> {
     edge: Indexed<EdgeI, &'k Relation>,
     dst: NodeIndexed<'k>,
@@ -69,7 +70,6 @@ impl<'k> Display for NodeIDPrint<'k> {
 
 /// Modeled after systemd
 pub trait MItem {
-    type Param;
     type Serv: ServiceM;
 }
 
@@ -98,6 +98,7 @@ pub trait ItemAction: MItem {
 }
 
 pub trait ItemCreate: MItem {
+    type Param = ();
     type Created;
     /// Should not start or enable anything (as in systemd)
     async fn write(&self, param: Self::Param, serv: &Self::Serv) -> Result<Self::Created>;
@@ -108,6 +109,7 @@ pub trait ItemRM: MItem {
 }
 
 #[public]
+#[derive(Clone, Copy)]
 struct Indexed<I, N> {
     id: I,
     item: N,

@@ -12,6 +12,7 @@ use std::{borrow::Cow, os::fd::AsRawFd, path::PathBuf};
 
 use anyhow::ensure;
 use anyhow::Result;
+use derive_new::new;
 use fully_pub::fully_pub as public;
 use indexmap::{Equivalent, IndexMap};
 use libc::stat;
@@ -44,7 +45,7 @@ impl Display for ExactNS {
 /// We want to uniquely identify a file so we don't get into a wrong NS.
 /// IIRC ino and dev uniquely identifies a file
 #[public]
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, PartialOrd, Ord, new)]
 struct UniqueFile {
     ino: u64,
     dev: u64,
@@ -200,6 +201,7 @@ pub enum NSSource {
     /// And we don't keep ephemeral proc fs paths either
     /// Treated as path when validating
     /// True for IOCTL-able
+    /// False for not (usually root ns)
     Unavail(bool),
 }
 

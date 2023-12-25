@@ -12,10 +12,12 @@ It's recommended to use the veth + tun2proxy method.
 ./nsproxy install -s # installs nsproxy and sproxy to your /usr/local (requires root) and makes sproxy suid
 # it assumes sproxy is in the same directory as its nsproxy binary
 # even though sproxy is SUID, it still runs SUDO to check your permission
-sproxy veth -t ./test_proxy.json # gives you a shell inside a proxied container
+sproxy new --mount --veth --tun2proxy ./test_proxy.json # gives you a shell inside a proxied container
 # later you may
-sproxy node <index> run # enter that container from another shell
+sproxy node 1 run # enter that container from another shell
 ```
+
+![](./pic.png)
 
 ## Rationale
 
