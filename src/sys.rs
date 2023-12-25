@@ -484,7 +484,8 @@ pub fn cmd_uid(uid: Option<u32>, allow_root: bool) -> Result<()> {
     let user = uzers::get_user_by_uid(u.as_raw()).unwrap();
     let g = user.primary_group_id().into();
     info!("set initgroups");
-    initgroups(&CString::new(user.name().as_bytes())?, g)?;
+    // This line failed for a flatpak ns
+    let _ = initgroups(&CString::new(user.name().as_bytes())?, g);
     setresgid(g, g, g)?;
     setresuid(u, u, u)?;
     Ok(())
