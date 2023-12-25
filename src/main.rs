@@ -549,23 +549,26 @@ fn main() -> Result<()> {
                             rootful,
                         )?;
                         if matches!(r, NSAddRes::Found) {
-                            log::warn!("Skipping, Net NS exists in state file");
+                            log::warn!("Net NS exists in state file");
+                            // TODO: skip if everything is up
                             continue;
+                        } else {
+                            let edge = graphs.data.add_edge(src, out, None);
+                            log::info!(
+                                "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
+                                graphs.data[src].as_ref().unwrap().main.key()
+                            );
+                            let socks2t = Socks2TUN::new(&path, edge)?;
+                            let rel = socks2t
+                                .write((Layer::L3, Some(pspath.clone())), &serv)
+                                .await?;
+                            graphs.data[edge].replace(rel);
+                            graphs.dump_file(&paths, uid)?;
                         }
-                        let edge = graphs.data.add_edge(src, out, None);
-                        log::info!(
-                            "Src/Probe {src:?} {}, OutNode(This process), Src -> Out {edge:?}",
-                            graphs.data[src].as_ref().unwrap().main.key()
-                        );
-                        let socks2t = Socks2TUN::new(&path, edge)?;
-                        let rel = socks2t
-                            .write((Layer::L3, Some(pspath.clone())), &serv)
-                            .await?;
-                        graphs.data[edge].replace(rel);
-                        graphs.dump_file(&paths, uid)?;
-                        serv.reload(&ctx).await?;
                         let nw = graphs.nodewdeps(src)?;
                         nw.write(Some(pspath.clone()), &serv).await?;
+
+                        serv.reload(&ctx).await?;
                         nw.1.restart(&serv, &ctx).await?;
                         nw.0.restart(&serv, &ctx).await?;
                     }
