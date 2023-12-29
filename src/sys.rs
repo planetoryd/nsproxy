@@ -24,7 +24,7 @@ use id_alloc::NetRange;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use libc::{pid_t, stat, syscall, uid_t};
 use netlink_ops::{
-    netlink::{nl_ctx, NLDriver, VPairKey, VethConn, NLHandle},
+    netlink::{nl_ctx, NLDriver, NLHandle, VPairKey, VethConn},
     state::{Existence, ExpCollection},
 };
 use tracing::info;
@@ -479,7 +479,7 @@ pub fn enable_ping_gid(gid: Gid) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_uid(uid: Option<u32>, allow_root: bool) -> Result<()> {
+pub fn cmd_uid(uid: Option<u32>, allow_root: bool, change_uid: bool) -> Result<()> {
     let u = Uid::from_raw(what_uid(uid, allow_root)?);
     let user = uzers::get_user_by_uid(u.as_raw()).unwrap();
     let g = user.primary_group_id().into();
@@ -487,7 +487,9 @@ pub fn cmd_uid(uid: Option<u32>, allow_root: bool) -> Result<()> {
     // This line failed for a flatpak ns
     let _ = initgroups(&CString::new(user.name().as_bytes())?, g);
     setresgid(g, g, g)?;
-    setresuid(u, u, u)?;
+    if change_uid {
+        setresuid(u, u, u)?;
+    }
     Ok(())
 }
 

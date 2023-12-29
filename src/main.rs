@@ -231,7 +231,9 @@ fn main() -> Result<()> {
 
             rt.block_on(async {
                 let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-                let ctx = graphs.prune(&mut va, &mut serv, &mut rmnode, &mut nl).await?;
+                let ctx = graphs
+                    .prune(&mut va, &mut serv, &mut rmnode, &mut nl)
+                    .await?;
                 graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
                 aok!()
             })?;
@@ -322,6 +324,7 @@ fn main() -> Result<()> {
                         // We don't change uid of this process.
                         // Otherwise probe might fail due to perms
                         cmd.current_dir(cwd);
+                        cmd_uid(Some(wuid), true, false)?;
                         cmd.uid(wuid);
 
                         sc.read_exact(&mut buf)?;
@@ -645,7 +648,7 @@ fn main() -> Result<()> {
                         let cwd = std::env::current_dir()?;
                         nss.validated_enter()?;
                         drop(graphs);
-                        cmd_uid(uid, true)?;
+                        cmd_uid(uid, true, true)?;
                         let mut cmd =
                             Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
                         cmd.current_dir(cwd);
@@ -757,7 +760,7 @@ fn main() -> Result<()> {
         Commands::Setns { pid, cmd, uid } => {
             let f = unsafe { pidfd::PidFd::open(pid.try_into().unwrap(), 0) }?;
             setns(f, CloneFlags::CLONE_NEWNET)?;
-            cmd_uid(uid, true)?;
+            cmd_uid(uid, true, true)?;
             let mut cmd = Command::new(your_shell(cmd)?.ok_or(anyhow!("specify env var SHELL"))?);
             cmd.current_dir(cwd);
             cmd.spawn()?.wait()?;
