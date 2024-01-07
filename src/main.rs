@@ -63,6 +63,7 @@ use tracing::{info, warn, Level};
 use tracing_log::LogTracer;
 use tracing_subscriber::FmtSubscriber;
 use tun::{AsyncDevice, Configuration, Device, Layer};
+use crate::PidPath::Selfproc;
 
 #[derive(Parser)]
 #[command(
@@ -174,7 +175,9 @@ enum NodeOps {
         uid: Option<u32>,
     },
     Reboot,
-    Prune,
+    RM {
+        ids: Vec<Ix>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -231,8 +234,10 @@ fn main() -> Result<()> {
 
             rt.block_on(async {
                 let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-                let ctx = graphs
-                    .prune(&mut va, &mut serv, &mut rmnode, &mut nl)
+                let ctx = NSGroup::proc_path(Selfproc, None)?;
+                nl.fill().await?;
+                graphs
+                    .prune(&ctx, &mut va, &mut serv, &mut rmnode, &mut nl)
                     .await?;
                 graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
                 aok!()
@@ -280,8 +285,10 @@ fn main() -> Result<()> {
             let mut rmnode = Default::default();
             rt.block_on(async {
                 let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-                let ctx = graphs
-                    .prune(&mut va, &mut serv, &mut rmnode, &mut nl)
+                let ctx = NSGroup::proc_path(Selfproc, None)?;
+                nl.fill().await?;
+                graphs
+                    .prune(&ctx, &mut va, &mut serv, &mut rmnode, &mut nl)
                     .await?;
                 graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
                 aok!()
@@ -307,7 +314,7 @@ fn main() -> Result<()> {
                         prctl::set_pdeathsig(Some(SIGTERM))?;
                         unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                         sc.write_all(&[0])?;
-                        sethostname("proxied")?;
+                        // sethostname("proxied")?;
                         if depriv_userns {
                             enable_ping_gid(gid)?
                         } else {
@@ -714,7 +721,8 @@ fn main() -> Result<()> {
                             aok!()
                         })?;
                     }
-                    NodeOps::Prune => {
+                    NodeOps::RM { ids } => {
+                        let ids: Vec<_> = ids.into_iter().map(NodeI::from).collect();
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()?;
@@ -724,8 +732,13 @@ fn main() -> Result<()> {
                         let mut rmnode = Default::default();
                         rt.block_on(async {
                             let mut nl = NLDriver::new(NLHandle::new_self_proc_tokio()?);
-                            let ctx = graphs
-                                .prune(&mut va, &mut serv, &mut rmnode, &mut nl)
+                            nl.fill().await?;
+                            let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
+                            graphs
+                                .prune(&ctx, &mut va, &mut serv, &mut rmnode, &mut nl)
+                                .await?;
+                            graphs
+                                .node_rm(&ctx, &ids[..], &mut va, &mut rmnode, &mut nl)
                                 .await?;
                             graphs.do_prune(&ctx, &serv, rmnode, &mut nl).await?;
                             aok!()

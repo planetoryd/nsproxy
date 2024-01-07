@@ -37,7 +37,7 @@ use netlink_ops::netlink::{nl_ctx, LinkAB, LinkKey, NLDriver, NLHandle};
 use nsproxy_common::{NSSource, PidPath::Selfproc, UniqueFile, VaCache, ValidationErr};
 use petgraph::visit::IntoNodeReferences;
 use serde_json::{from_str, to_string_pretty};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub fn find_all_netns() -> Result<HashMap<UniqueFile, PathBuf>> {
     let netk = OsStr::new("net");
@@ -100,10 +100,11 @@ pub async fn check_veths(
                         .map(|srcino| dstino.unique == ctxino || srcino.unique == ctxino)
                 });
                 if let Some(lk) = lke {
+                    // keep
                     if match_ns {
                         links.insert(lk);
+                        // but links found are inserted, for use as you may want to remove this node later
                     }
-                    // keep
                 } else {
                     if match_ns {
                         // Veth not preset. Yet I am in one of the target and source NS.
@@ -181,17 +182,44 @@ impl Graphs {
         }
         Ok(())
     }
+    pub async fn node_rm<'f, S>(
+        &mut self,
+        ctx: &NSGroup<ExactNS>,
+        nodes: &[NodeI],
+        va: &mut VaCache,
+        remove: &mut HashMap<NodeI, RM>,
+        nl: &mut NLDriver,
+    ) -> Result<()>
+    where
+        for<'a, 'b> NodeWDeps<'a, 'b>: ItemRM<Serv = S>,
+    {
+        for ni in nodes {
+            if let Some(k) = self
+                .data
+                .node_weight(*ni)
+                .ok_or(anyhow!("specified node to rm doesnt exist"))?
+            {
+                let nodew = self.nodewdeps(*ni)?;
+                let rm = insert_rm_ref(remove, &ni);
+                check_veths(nl, &nodew, &ctx, &mut rm.links).await?;
+                rm.rm = true;
+            } else {
+                warn!("skipped {:?} for it's None", ni)
+            }
+        }
+        Ok(())
+    }
     pub async fn prune<'f, S>(
         &mut self,
+        ctx: &NSGroup<ExactNS>,
         va: &mut VaCache,
         serv: &S,
         remove: &mut HashMap<NodeI, RM>,
         nl: &mut NLDriver,
-    ) -> Result<NSGroup>
+    ) -> Result<()>
     where
         for<'a, 'b> NodeWDeps<'a, 'b>: ItemRM<Serv = S>,
     {
-        let ctx = NSGroup::proc_path(Selfproc, None)?;
         for (ni, node) in self.data.node_references() {
             if let Some(k) = node {
                 let rx = k.main.net.validate(va, &ctx);
@@ -227,7 +255,7 @@ impl Graphs {
                 insert_rm(remove, &ni, ());
             }
         }
-        Ok(ctx)
+        Ok(())
     }
     pub async fn do_prune<'f, S>(
         &mut self,
@@ -243,12 +271,13 @@ impl Graphs {
             let nodew = self.nodewdeps(*ni)?;
             if rm.rm {
                 for link in &rm.links {
+                    info!("Remove {:?}", &link);
                     nl.remove_link(&link).await?;
                 }
                 nodew.remove(serv).await?;
                 self.map.remove(&nodew.0.item.main.key());
                 self.data.remove_node(*ni);
-            } 
+            }
         }
         Ok(())
     }
