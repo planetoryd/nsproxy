@@ -315,6 +315,8 @@ fn main() -> Result<()> {
                         unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUTS)?;
                         sc.write_all(&[0])?;
                         // sethostname("proxied")?;
+                        // The line above caused XWayland to malfunction for me.
+                        // Librewolf and vscode launched in nsproxy had intermittent full-system lags.
                         if depriv_userns {
                             enable_ping_gid(gid)?
                         } else {
