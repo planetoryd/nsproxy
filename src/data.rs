@@ -195,6 +195,10 @@ impl<'n> NSState<'n> {
     pub fn validated_enter(&mut self) -> Result<()> {
         let cache = &mut self.va;
         let ctx = NSGroup::proc_path(PidPath::Selfproc, None)?;
+        if ctx.net.must()?.unique == self.target.net.must()?.unique {
+            bail!("Target NetNS is identital to the current NetNS");
+            // Just error in this case, which should prevent a large number of mistakes.
+        }
         let mut val = NSGroup::<[Option<ValidateR>; 2]>::default();
         let ctx = if ctx.pid.must()?.unique == self.target.pid.must()?.unique {
             if ctx.mnt.must()?.unique == self.target.mnt.must()?.unique {

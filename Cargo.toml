@@ -82,6 +82,7 @@ procfs = "0.16.0"
 fs4 = "0.7.0"
 linux-raw-sys = { version = "0.6.3", features = ["ioctl"] }
 passfd = { version = "*" }
+derive-new = "0.6.0"
 # daemonize-me = "2.0.1"
 
 [build-dependencies]

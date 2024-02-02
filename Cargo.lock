@@ -2014,6 +2014,7 @@ dependencies = [
  "clap",
  "daggy",
  "derivative",
+ "derive-new",
  "directories",
  "env_logger 0.10.1",
  "fs4",

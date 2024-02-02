@@ -14,6 +14,7 @@ use daggy::{
     },
     EdgeIndex, NodeIndex,
 };
+use derive_new::new;
 use owo_colors::OwoColorize;
 use tun::Layer;
 
@@ -109,7 +110,7 @@ pub trait ItemRM: MItem {
 }
 
 #[public]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, new)]
 struct Indexed<I, N> {
     id: I,
     item: N,
