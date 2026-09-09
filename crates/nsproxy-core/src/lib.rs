@@ -397,6 +397,32 @@ mod tests {
     }
 
     #[test]
+    fn test_hotconfig_process_veth_dns_adds_aliases_once_and_preserves_explicit() {
+        let mut hot = HotConfig::default();
+        hot.dns.insert("peer.ns".to_owned(), "192.0.2.1".to_owned());
+        hot.veth = vec![
+            HotVeth {
+                dst: "peer".to_owned(),
+                dst_ip4: Some("192.0.2.2".parse().unwrap()),
+                ..Default::default()
+            },
+            HotVeth {
+                dst: "other".to_owned(),
+                dst_ip4: Some("192.0.2.3".parse().unwrap()),
+                ..Default::default()
+            },
+        ];
+
+        hot.process_veth_dns();
+        let first = hot.dns.clone();
+        hot.process_veth_dns();
+
+        assert_eq!(hot.dns, first);
+        assert_eq!(hot.dns.get("peer.ns"), Some(&"192.0.2.1".to_owned()));
+        assert_eq!(hot.dns.get("other.ns"), Some(&"192.0.2.3".to_owned()));
+    }
+
+    #[test]
     fn test_hotconfig_merged_mounts_rejects_duplicate_targets() {
         let mut structured = HotConfig::default();
         structured.mounts = vec![
@@ -1306,6 +1332,19 @@ impl HotConfig {
             .any(|existing| existing.target == mount.target)
         {
             self.mounts.push(mount);
+        }
+    }
+
+    /// Add DNS aliases for configured VETH endpoints in target namespaces.
+    /// Explicit DNS entries take precedence over generated aliases.
+    pub fn process_veth_dns(&mut self) {
+        for veth in &self.veth {
+            let (Some(ip), false) = (veth.dst_ip4, veth.dst.is_empty()) else {
+                continue;
+            };
+            self.dns
+                .entry(format!("{}.ns", veth.dst))
+                .or_insert_with(|| ip.to_string());
         }
     }
 

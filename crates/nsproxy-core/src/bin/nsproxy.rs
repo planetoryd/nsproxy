@@ -2062,6 +2062,7 @@ fn main() -> anyhow::Result<()> {
                 if let Ok(mut hot) = serde_json::from_str::<HotConfig>(&fc) {
                     hot.process_x11();
                     hot.process_wayland();
+                    hot.process_veth_dns();
                     hot.expand_with(&hot_vars);
                     if let Ok(mounts) = hot.merged_mounts() {
                         if !mounts.is_empty() {
@@ -2168,6 +2169,7 @@ fn load_hot_config_from_disk_or_default(path: &Path) -> HotConfig {
             Ok(mut conf) => {
                 conf.process_x11();
                 conf.process_wayland();
+                conf.process_veth_dns();
                 conf
             }
             Err(e) => {
@@ -2467,6 +2469,7 @@ async fn serve_worker_runtime(
                     let mut newconf = request.config;
                     newconf.process_x11();
                     newconf.process_wayland();
+                    newconf.process_veth_dns();
                     replace_mount_resolv_conf(
                         &newconf.resolv_conf_dns,
                         write_resolv_conf_directly,
@@ -2858,6 +2861,8 @@ fn cmd_serve(
                                         match tokio::fs::read_to_string(&hot_conf_cmd).await {
                                             Ok(fc) => match serde_json::from_str::<HotConfig>(&fc) {
                                                 Ok(cfg) => {
+                                                    let mut cfg = cfg;
+                                                    cfg.process_veth_dns();
                                                     let _ = reload_tx.send(nsproxy_core::hot_reload::HotReloadTrigger::ApplyConfig {
                                                         source: "direct",
                                                         persist_backup: false,
@@ -2947,6 +2952,8 @@ fn cmd_serve(
                                     diag::ControlCommand::ApplyHotConfig { content } => {
                                         match serde_json::from_str::<HotConfig>(&content) {
                                             Ok(cfg) => {
+                                                let mut cfg = cfg;
+                                                cfg.process_veth_dns();
                                                 match serde_json::to_string_pretty(&cfg) {
                                                     Ok(saved_content) => {
                                                         if let Err(err) = tokio::fs::write(&hot_conf_cmd, &saved_content).await {
@@ -5941,6 +5948,7 @@ async fn watch_hot_mounts(hot_path: &Path, vars: nsproxy_core::PathExpansionStat
 
         hot.process_x11();
         hot.process_wayland();
+        hot.process_veth_dns();
         hot.expand_with(&vars);
 
         if prev_hot.as_ref() == Some(&hot) {

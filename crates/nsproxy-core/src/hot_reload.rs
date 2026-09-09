@@ -715,7 +715,8 @@ pub async fn watch_hot(
 
                     match tokio::fs::read_to_string(&conf).await {
                         Ok(fc) => match serde_json::from_str::<HotConfig>(&fc) {
-                            Ok(cfg) => {
+                            Ok(mut cfg) => {
+                                cfg.process_veth_dns();
                                 if ignored_backup.as_ref() == Some(&cfg) {
                                     ignored_backup = None;
                                     continue;
@@ -759,6 +760,8 @@ pub async fn watch_hot(
             };
 
             let source = source.unwrap_or("direct");
+            let mut desired = desired;
+            desired.process_veth_dns();
             let desired_state = derive_desired_state(&desired);
             let diff = calculate_hot_diff(applied_state.as_ref(), &desired_state);
             if diff.is_empty() {
