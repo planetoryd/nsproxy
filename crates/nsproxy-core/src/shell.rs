@@ -73,6 +73,24 @@ pub struct ShellArgs {
     pub args: Vec<String>,
 }
 
+#[derive(clap::Parser, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnterArgs {
+    /// Defaults to your current login user
+    #[arg(short, long)]
+    pub uid: Option<u32>,
+    /// Also comes with defaults
+    #[arg(short, long)]
+    pub gid: Option<u32>,
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    /// Override the entire supplemental-group vector.
+    #[arg(long, value_delimiter = ',')]
+    pub gids: Vec<u32>,
+    /// Executable and argv, after the `--` delimiter.
+    #[arg(trailing_var_arg = true, required = true)]
+    pub command: Vec<String>,
+}
+
 impl ShellPrefs {
     pub fn take_args(&mut self, args: ShellArgs) {
         if let Some(uid) = args.uid {
@@ -97,6 +115,20 @@ impl ShellPrefs {
                 .map(|arg| CString::new(arg).unwrap())
                 .collect();
         }
+    }
+
+    pub fn take_enter_args(&mut self, args: EnterArgs) {
+        self.uid = args.uid;
+        self.gid = args.gid;
+        self.cwd = args.cwd;
+        if !args.gids.is_empty() {
+            self.gids_raw = args.gids.into_iter().collect();
+        }
+        let mut command = args.command.into_iter();
+        self.prefer_shell = command.next();
+        self.args = command
+            .map(|arg| CString::new(arg).expect("command arguments cannot contain NUL bytes"))
+            .collect();
     }
     /// Explicit environment with no inheritance
     pub fn set_env_explicit(&mut self, mut env: HashMap<String, String>) -> Result<()> {

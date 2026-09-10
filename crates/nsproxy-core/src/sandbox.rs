@@ -63,6 +63,14 @@ fn bind_target_has_desired_state(
     bind_target_matches_source(source, target)
 }
 
+fn status_source_path(configured_mode: &SandboxMode, source: &Path) -> PathBuf {
+    if *configured_mode == SandboxMode::Pivot && source.is_absolute() {
+        Path::new("/pivot").join(source.strip_prefix("/").unwrap_or(source))
+    } else {
+        source.to_path_buf()
+    }
+}
+
 fn reconcile_bind_target(mount_info: &MountInfo, source: &Path, target: &Path) -> Result<bool> {
     if bind_target_has_desired_state(mount_info, source, target)? {
         return Ok(false);
@@ -557,7 +565,8 @@ pub fn collect_sandbox_status(
         .map(|mount| {
             let mounted = mount_info.target_is_mountpoint(&mount.target);
             let target_matches_source = if mounted {
-                bind_target_matches_source(&mount.source, &mount.target).unwrap_or(false)
+                let source = status_source_path(&configured_mode, &mount.source);
+                bind_target_matches_source(&source, &mount.target).unwrap_or(false)
             } else {
                 false
             };

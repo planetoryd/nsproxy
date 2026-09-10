@@ -638,7 +638,7 @@ use tun2socks5::tun_rs::AsyncDevice;
 use tun2socks5::tun_rs::DeviceBuilder;
 use utils::MapExt;
 
-use crate::shell::ShellArgs;
+use crate::shell::{EnterArgs, ShellArgs};
 use crate::utils::dump_as_json;
 use crate::utils::dump_as_toml;
 use nsproxy_common::routing::{ProxyID, ProxyNym};
@@ -2308,7 +2308,7 @@ pub enum MainCommand {
         /// Instance name or path (if starts with /, ./, or ~/)
         target: String,
         #[command(flatten)]
-        sargs: ShellArgs,
+        eargs: EnterArgs,
     },
 
     /// Install nsproxy to a folder

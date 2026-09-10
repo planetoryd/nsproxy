@@ -59,7 +59,7 @@ use nsproxy_core::{
         apply_chmod, apply_mounts, assert_mount_ns_matches, collect_sandbox_status,
         read_sandbox_status, write_sandbox_status,
     },
-    shell::{ShellArgs, ShellPrefs},
+    shell::{ShellPrefs, ShellArgs},
     state_paths,
     sys::{
         Clone3Result, NSEnter, check_capsys, check_selfns, enable_ping_all, mount_bind,
@@ -878,9 +878,9 @@ fn main() -> anyhow::Result<()> {
             })?;
         }
         /// We are just putting state in proc now, basically. Seems cleaner
-        MainCommand::Enter { sargs, target } => {
+        MainCommand::Enter { eargs, target } => {
             let mut shell_prefs = ShellPrefs::default();
-            shell_prefs.take_args(sargs);
+            shell_prefs.take_enter_args(eargs);
             shell_prefs.adjust();
 
             // Resolve the bind mount path: profile name resolves to /nsp3/{name}/net,

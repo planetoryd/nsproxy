@@ -38,3 +38,11 @@ Load more than one note only when the owning code path genuinely crosses those b
 - Do not run broad `cargo fmt` or reformat unrelated files unless explicitly requested.
 - Keep formatting and documentation changes limited to the implementation touched by the task.
 - Validate with the narrowest relevant executable check.
+
+Example way to run commands in a container, such as `docker`
+
+```sh
+sp enter docker -- sh -c 'printf "user=%s cwd=%s\n" "$(id -un)" "$PWD"'
+sp enter docker --cwd /tmp -- pwd
+sp enter docker -u 0 -- sh -c 'set -eu; docker ps --format "{{.Names}}\t{{.Status}}"'
+```
