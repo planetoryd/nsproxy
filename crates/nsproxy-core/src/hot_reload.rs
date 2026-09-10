@@ -716,7 +716,7 @@ pub async fn watch_hot(
                     match tokio::fs::read_to_string(&conf).await {
                         Ok(fc) => match serde_json::from_str::<HotConfig>(&fc) {
                             Ok(mut cfg) => {
-                                cfg.process_veth_dns();
+                                cfg.process_and_save(&conf)?;
                                 if ignored_backup.as_ref() == Some(&cfg) {
                                     ignored_backup = None;
                                     continue;
@@ -761,7 +761,7 @@ pub async fn watch_hot(
 
             let source = source.unwrap_or("direct");
             let mut desired = desired;
-            desired.process_veth_dns();
+            desired.process();
             let desired_state = derive_desired_state(&desired);
             let diff = calculate_hot_diff(applied_state.as_ref(), &desired_state);
             if diff.is_empty() {
@@ -773,8 +773,7 @@ pub async fn watch_hot(
                     error: None,
                 });
                 if persist_backup {
-                    let json = serde_json::to_string_pretty(&desired)?;
-                    tokio::fs::write(&conf, json).await?;
+                    desired.process_and_save(&conf)?;
                     ignored_backup = Some(desired);
                 }
                 continue;
@@ -795,8 +794,7 @@ pub async fn watch_hot(
             {
                 Ok(()) => {
                     if persist_backup {
-                        let json = serde_json::to_string_pretty(&desired)?;
-                        tokio::fs::write(&conf, json).await?;
+                        desired.process_and_save(&conf)?;
                         ignored_backup = Some(desired.clone());
                     }
 

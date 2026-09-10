@@ -2060,9 +2060,7 @@ fn main() -> anyhow::Result<()> {
             if hot_path.exists() {
                 let fc = std::fs::read_to_string(&hot_path)?;
                 if let Ok(mut hot) = serde_json::from_str::<HotConfig>(&fc) {
-                    hot.process_x11();
-                    hot.process_wayland();
-                    hot.process_veth_dns();
+                    hot.process_and_save(&hot_path)?;
                     hot.expand_with(&hot_vars);
                     if let Ok(mounts) = hot.merged_mounts() {
                         if !mounts.is_empty() {
@@ -2167,9 +2165,9 @@ fn load_hot_config_from_disk_or_default(path: &Path) -> HotConfig {
     match std::fs::read_to_string(path) {
         Ok(fc) => match serde_json::from_str::<HotConfig>(&fc) {
             Ok(mut conf) => {
-                conf.process_x11();
-                conf.process_wayland();
-                conf.process_veth_dns();
+                if let Err(err) = conf.process_and_save(path) {
+                    warn!(?path, %err, "failed to persist normalized hot config");
+                }
                 conf
             }
             Err(e) => {
@@ -2467,9 +2465,7 @@ async fn serve_worker_runtime(
                 >(&payload)
                 {
                     let mut newconf = request.config;
-                    newconf.process_x11();
-                    newconf.process_wayland();
-                    newconf.process_veth_dns();
+                    newconf.process();
                     replace_mount_resolv_conf(
                         &newconf.resolv_conf_dns,
                         write_resolv_conf_directly,
@@ -2862,7 +2858,9 @@ fn cmd_serve(
                                             Ok(fc) => match serde_json::from_str::<HotConfig>(&fc) {
                                                 Ok(cfg) => {
                                                     let mut cfg = cfg;
-                                                    cfg.process_veth_dns();
+                                                    if let Err(err) = cfg.process_and_save(&hot_conf_cmd) {
+                                                        warn!(%err, "failed to persist normalized hot config");
+                                                    }
                                                     let _ = reload_tx.send(nsproxy_core::hot_reload::HotReloadTrigger::ApplyConfig {
                                                         source: "direct",
                                                         persist_backup: false,
@@ -2953,18 +2951,11 @@ fn cmd_serve(
                                         match serde_json::from_str::<HotConfig>(&content) {
                                             Ok(cfg) => {
                                                 let mut cfg = cfg;
-                                                cfg.process_veth_dns();
-                                                match serde_json::to_string_pretty(&cfg) {
-                                                    Ok(saved_content) => {
-                                                        if let Err(err) = tokio::fs::write(&hot_conf_cmd, &saved_content).await {
-                                                            diag_srv.emit(diag::DiagEvent::HotConfigSnapshot {
-                                                                ts: diag::Timestamp::now(),
-                                                                ok: false,
-                                                                content: None,
-                                                                error: Some(err.to_string()),
-                                                            });
-                                                            warn!("hot config persist error: {err}");
-                                                        } else if let Err(err) = reload_tx.send(nsproxy_core::hot_reload::HotReloadTrigger::ApplyConfig {
+                                                match cfg.process_and_save(&hot_conf_cmd) {
+                                                    Ok(()) => {
+                                                        let saved_content = serde_json::to_string_pretty(&cfg)
+                                                            .unwrap_or_else(|_| content.clone());
+                                                        if let Err(err) = reload_tx.send(nsproxy_core::hot_reload::HotReloadTrigger::ApplyConfig {
                                                             source: "direct",
                                                             persist_backup: false,
                                                             config: Arc::new(cfg),
@@ -2995,12 +2986,12 @@ fn cmd_serve(
                                                     }
                                                 }
                                             }
-                                            Err(e) => {
+                                            Err(err) => {
                                                 diag_srv.emit(diag::DiagEvent::HotConfigSnapshot {
                                                     ts: diag::Timestamp::now(),
                                                     ok: false,
                                                     content: None,
-                                                    error: Some(e.to_string()),
+                                                    error: Some(err.to_string()),
                                                 });
                                             }
                                         }
@@ -4843,7 +4834,7 @@ fn handle_root_daemon_request(req: diag::RootDaemonRequest) -> RootDaemonAction 
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                std::fs::write(&path, content)?;
+                nsproxy_core::write_file_atomic(&path, &content)?;
                 Ok(())
             })();
             RootDaemonAction::Reply(match result {
@@ -5946,9 +5937,9 @@ async fn watch_hot_mounts(hot_path: &Path, vars: nsproxy_core::PathExpansionStat
             }
         };
 
-        hot.process_x11();
-        hot.process_wayland();
-        hot.process_veth_dns();
+        if let Err(err) = hot.process_and_save(hot_path) {
+            warn!(%err, "failed to persist normalized hot config");
+        }
         hot.expand_with(&vars);
 
         if prev_hot.as_ref() == Some(&hot) {

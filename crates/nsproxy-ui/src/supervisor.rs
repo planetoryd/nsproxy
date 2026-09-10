@@ -1882,6 +1882,7 @@ impl Supervisor {
                 let content = match serde_json::from_str::<HotConfig>(&content) {
                     Ok(mut hotconfig) => {
                         self.merge_live_route_into_hotconfig(&profile, &mut hotconfig);
+                        hotconfig.process();
                         serde_json::to_string_pretty(&hotconfig).unwrap_or(content)
                     }
                     Err(_) => content,

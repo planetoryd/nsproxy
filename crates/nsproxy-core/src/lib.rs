@@ -7,15 +7,18 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{File, create_dir_all};
+use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -182,6 +185,7 @@ pub fn octets_to_addr(a: &[u8], prefix: u8) -> Result<Option<IpNetwork>> {
 mod tests {
     use super::*;
     use ipnetwork::{IpNetwork, Ipv4Network};
+    use std::os::unix::fs::MetadataExt;
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
@@ -420,6 +424,23 @@ mod tests {
         assert_eq!(hot.dns, first);
         assert_eq!(hot.dns.get("peer.ns"), Some(&"192.0.2.1".to_owned()));
         assert_eq!(hot.dns.get("other.ns"), Some(&"192.0.2.3".to_owned()));
+    }
+
+    #[test]
+    fn test_hotconfig_process_and_save_skips_unchanged_write() {
+        let path = std::env::temp_dir().join(format!(
+            "nsp3-hotconfig-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut hot = HotConfig::default();
+        hot.process_and_save(&path).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+
+        hot.process_and_save(&path).unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1234,6 +1255,21 @@ fn is_absolute_or_variable(path: &Path, allow_home: bool, allow_instance: bool) 
 }
 
 impl HotConfig {
+    /// Normalize convenience fields into the explicit runtime configuration.
+    /// This is idempotent; explicit entries take precedence over generated ones.
+    pub fn process(&mut self) {
+        self.process_x11();
+        self.process_wayland();
+        self.process_veth_dns();
+    }
+
+    /// Normalize and persist this configuration as one atomic file replacement.
+    pub fn process_and_save(&mut self, path: &Path) -> Result<()> {
+        self.process();
+        let json = serde_json::to_vec_pretty(self)?;
+        write_file_atomic(path, &json)
+    }
+
     pub fn expand_placeholders(&mut self, instance_root: &Path) {
         let vars = PathExpansionState::for_instance(instance_root);
         self.expand_with(&vars);
@@ -1438,10 +1474,49 @@ impl HotConfig {
 
     /// Serialize and persist this config to `path`.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        let json = serde_json::to_vec_pretty(self)?;
+        write_file_atomic(path, &json)
     }
+}
+
+/// Replace a file atomically using a temporary file in the same directory.
+pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    match std::fs::read(path) {
+        Ok(existing) if existing == content => return Ok(()),
+        Ok(_) | Err(_) => {}
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let existing_mode = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions().mode());
+    let temporary = parent.join(format!(
+        ".{}.tmp.{}.{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        stamp
+    ));
+
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        if let Some(mode) = existing_mode {
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 // [schema-bump] To add schema VN:
