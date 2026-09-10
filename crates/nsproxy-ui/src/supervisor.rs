@@ -357,6 +357,9 @@ pub enum SupervisorCommand {
         profile: ContainerName,
         peer: ContainerName,
         veth_name: Option<String>,
+        src_ip4: Option<std::net::Ipv4Addr>,
+        dst_ip4: Option<std::net::Ipv4Addr>,
+        prefix_len: u8,
     },
     SaveHotconfigPrivileged {
         profile: ContainerName,
@@ -1864,6 +1867,9 @@ impl Supervisor {
                 profile,
                 peer,
                 veth_name,
+                src_ip4,
+                dst_ip4,
+                prefix_len,
             } => {
                 self.spawn_veth(
                     &profile,
@@ -1871,9 +1877,9 @@ impl Supervisor {
                         src: profile.clone(),
                         dst: peer,
                         veth_name,
-                        src_ip4: None,
-                        dst_ip4: None,
-                        prefix_len: 30,
+                        src_ip4,
+                        dst_ip4,
+                        prefix_len,
                     },
                     "temporary",
                 );

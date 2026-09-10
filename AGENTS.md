@@ -10,6 +10,7 @@ contextual guidance with minimal repeated tokens.
 
 - Runtime commands and `sp` CLI usage: `agentic/sp-commands.md`
 - Persistent state, config, namespaces, sandboxing, mounts, or process spawning: `agentic/runtime-state.md`
+- Rootfs backing, bind-mount I/O, and persistence concerns: `agentic/concerns-rootfs.md`
 - Unix sockets, daemon/service lifecycle, routing, diagnostics, reconnection, or the supervisor actor: `agentic/ipc-diagnostics.md`
 - egui views, editors, widgets, styling, or compact removal controls: `agentic/ui.md`
 - PTYs, external terminal windows, titles, or terminal key mappings: `agentic/terminal.md`

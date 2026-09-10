@@ -8899,6 +8899,9 @@ Pivot-enabled containers have URL opening handled right within the container, wh
                             .add_enabled(ready, egui::Button::new("Create veth pair"))
                             .clicked()
                         {
+                            let src_ip4 = draft.src_ip4.trim().parse().ok();
+                            let dst_ip4 = draft.dst_ip4.trim().parse().ok();
+                            let prefix_len = draft.prefix_len.trim().parse().unwrap_or(30);
                             self.supervisor.send(SupervisorCommand::CreateVeth {
                                 profile: profile.clone(),
                                 peer: if draft.basis_namespace {
@@ -8908,6 +8911,9 @@ Pivot-enabled containers have URL opening handled right within the container, wh
                                 },
                                 veth_name: (!draft.name.trim().is_empty())
                                     .then(|| draft.name.trim().to_string()),
+                                src_ip4,
+                                dst_ip4,
+                                prefix_len,
                             });
                             draft.submitted = true;
                         }
