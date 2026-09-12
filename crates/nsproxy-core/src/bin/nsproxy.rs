@@ -58,7 +58,7 @@ use nsproxy_core::{
     hot_reload::{VethIps, sync_links, watch_hot},
     sandbox::{
         apply_chmod, apply_mounts, assert_mount_ns_matches, collect_sandbox_status,
-        read_sandbox_status, write_sandbox_status,
+        ensure_sandbox_status_for_mnt, read_sandbox_status, write_sandbox_status,
     },
     shell::{ShellPrefs, ShellArgs},
     state_paths,
@@ -928,13 +928,26 @@ fn main() -> anyhow::Result<()> {
 
                 let ns_alive = read_ns_alive(&nsdata)?;
                 let profile = ns_alive.profile_name.as_deref().unwrap_or(target.as_str());
-                let sandbox_status = read_sandbox_status(profile).ok_or_else(|| {
-                    anyhow!(
-                        "no valid sandbox status for '{}' — run 'sp sandbox {}' first",
+                let profile_conf =
+                    TemplateConfig::load(&state_paths::profile_config(profile))?;
+                let sandbox_status = if let Some(child_pid) = ns_alive.child_pid {
+                    NSSource::Pid(child_pid as i32).enter(CloneFlags::CLONE_NEWNS)?;
+                    let expected_mnt = ExactNS::from_source((PidPath::Selfproc, "mnt"))?.unique;
+                    ensure_sandbox_status_for_mnt(
                         profile,
-                        profile
-                    )
-                })?;
+                        &expected_mnt,
+                        profile_conf.sandbox_mode,
+                        &profile_conf.mounts,
+                    )?
+                } else {
+                    read_sandbox_status(profile).ok_or_else(|| {
+                        anyhow!(
+                            "no valid sandbox status for '{}' — run 'sp sandbox {}' first",
+                            profile,
+                            profile
+                        )
+                    })?
+                };
                 enter_ns_sandboxed(&ns_alive, &sandbox_status, &resolved_path)?;
                 apply_ns_env(&mut shell_prefs, &ns_alive);
                 apply_dbus_env(&mut shell_prefs, &ns_alive);
@@ -1568,6 +1581,29 @@ fn main() -> anyhow::Result<()> {
                             );
                         }
 
+                        let expected_mnt =
+                            ExactNS::from_source((PidPath::Selfproc, "mnt"))?.unique;
+                        match profile_conf.sandbox_mode {
+                            SandboxMode::Pivot => {
+                                ensure_sandbox_status_for_mnt(
+                                    profile.as_str(),
+                                    &expected_mnt,
+                                    profile_conf.sandbox_mode,
+                                    &profile_conf.mounts,
+                                )?;
+                            }
+                            SandboxMode::Overlay => {
+                                let sandbox_status = collect_sandbox_status(
+                                    SandboxMode::Overlay,
+                                    nsproxy_core::sandbox::SandboxState::NoPivot,
+                                    &[],
+                                    None,
+                                )?;
+                                write_sandbox_status(&profile, &sandbox_status)?;
+                            }
+                        }
+                        tx.write(&[1])?; // status repair is complete
+
                         loop {
                             std::thread::park();
                         }
@@ -1673,17 +1709,23 @@ fn main() -> anyhow::Result<()> {
                         }
 
                         tx.write(&[0])?;
+                        let mut status_ready = [0; 1];
+                        tx.read(&mut status_ready)?;
 
                         if profile_conf.sandbox_mode == SandboxMode::Pivot {
                             let sandbox_status_path = state_paths::sandbox_status(&profile);
-                            // read_sandbox_status purges stale (previous-boot) state automatically.
-                            let prior_state = nsproxy_core::sandbox::read_sandbox_status_for_mnt(
+                            let sandbox_status = nsproxy_core::sandbox::read_sandbox_status_for_mnt(
                                 profile.as_str(),
                                 &child_mnt.unique,
                             )
-                            .map(|s| s.detected_state);
-                            match prior_state {
-                                Some(nsproxy_core::sandbox::SandboxState::Pivoted) => {
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "sandbox status was not written for profile '{}'",
+                                    profile
+                                )
+                            })?;
+                            match sandbox_status.detected_state {
+                                nsproxy_core::sandbox::SandboxState::Pivoted => {
                                     warn!(
                                         profile = profile.as_str(),
                                         sandbox_status = %sandbox_status_path.display(),
@@ -1691,7 +1733,7 @@ fn main() -> anyhow::Result<()> {
                                          processes spawned into this container see the sandbox rootfs, not the host."
                                     );
                                 }
-                                Some(nsproxy_core::sandbox::SandboxState::NoPivot) => {
+                                nsproxy_core::sandbox::SandboxState::NoPivot => {
                                     warn!(
                                         profile = profile.as_str(),
                                         sandbox_status = %sandbox_status_path.display(),
@@ -1700,31 +1742,11 @@ fn main() -> anyhow::Result<()> {
                                          pivot_root will operate on the HOST filesystem and may overwrite host files."
                                     );
                                 }
-                                None => {
-                                    warn!(
-                                        profile = profile.as_str(),
-                                        sandbox_status = %sandbox_status_path.display(),
-                                        "UNPIVOTED: no sandbox_status.json found; 'sp sandbox' has never run. \
-                                         Any process spawned into this container before 'sp sandbox' applies \
-                                         pivot_root will operate on the HOST filesystem and may overwrite host files."
-                                    );
-                                }
                             }
                         } else if profile_conf.sandbox_mode == SandboxMode::Overlay {
-                            // Overlay containers do not go through `sp sandbox`, so
-                            // sandbox_status.json is never written by that path.  Write it
-                            // here during `sp up` so that the daemon can spawn processes
-                            // (sp serve, sp dbus, PTYs, etc.) which all require the file.
-                            let sandbox_status = collect_sandbox_status(
-                                SandboxMode::Overlay,
-                                nsproxy_core::sandbox::SandboxState::NoPivot,
-                                &[],
-                                None,
-                            )?;
-                            write_sandbox_status(&profile, &sandbox_status)?;
                             info!(
                                 profile = profile.as_str(),
-                                "wrote sandbox_status.json for overlay container"
+                                "verified sandbox_status.json for overlay container"
                             );
                         }
 

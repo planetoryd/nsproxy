@@ -697,6 +697,33 @@ pub fn read_sandbox_status_for_mnt(
     }
 }
 
+/// Return the current sandbox status for a profile, repairing missing or
+/// mismatched persisted state from the current mount namespace.
+pub fn ensure_sandbox_status_for_mnt(
+    profile_name: &str,
+    expected_mnt: &UniqueFile,
+    configured_mode: SandboxMode,
+    mounts: &[ProfileMount],
+) -> Result<SandboxStatus> {
+    if let Some(status) = read_sandbox_status_for_mnt(profile_name, expected_mnt) {
+        return Ok(status);
+    }
+
+    let status = collect_sandbox_status(configured_mode, SandboxState::NoPivot, mounts, None)?;
+    if status.mnt_namespace.as_ref() != Some(expected_mnt) {
+        bail!(
+            "sandbox status repair for '{}' ran in the wrong mount namespace",
+            profile_name
+        );
+    }
+    write_sandbox_status(profile_name, &status)?;
+    info!(
+        profile = profile_name,
+        "wrote fresh unpivoted sandbox_status.json after stale or missing state"
+    );
+    Ok(status)
+}
+
 /// Check whether the current process is in the expected profile mount namespace.
 ///
 /// This avoids relying on `/proc/1`, which is not a stable host reference once
