@@ -321,6 +321,7 @@ pub struct ProtocolHandshake {
     pub channel: ProtocolChannel,
     pub version: String,
     pub netns: UniqueFile,
+    pub self_pid: u32,
 }
 
 static PROTOCOL_VERSION: OnceLock<String> = OnceLock::new();
@@ -358,6 +359,7 @@ fn local_handshake(channel: ProtocolChannel) -> Result<ProtocolHandshake> {
         channel,
         version: protocol_version().to_string(),
         netns: ExactNS::from_source((PidPath::Selfproc, "net"))?.unique,
+        self_pid: std::process::id(),
     })
 }
 
@@ -1001,10 +1003,10 @@ pub async fn connect(sock_path: &Path) -> Result<DiagEventStream> {
 }
 
 /// Connect to a diagnostic socket and return the server's network namespace identity.
-pub async fn connect_with_identity(sock_path: &Path) -> Result<(DiagEventStream, UniqueFile)> {
+pub async fn connect_with_identity(sock_path: &Path) -> Result<(DiagEventStream, ProtocolHandshake)> {
     let mut stream = UnixStream::connect(sock_path).await?;
     let handshake = handshake_client(&mut stream, ProtocolChannel::Diag).await?;
-    Ok((DiagEventStream::from_stream(stream), handshake.netns))
+    Ok((DiagEventStream::from_stream(stream), handshake))
 }
 
 pub struct DiagEventStream {

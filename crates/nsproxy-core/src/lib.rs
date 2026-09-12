@@ -2321,6 +2321,15 @@ pub enum MainCommand {
         /// Optionally supply an PID
         pid: Option<u32>,
     },
+    /// List or kill all visible processes in a container's network namespace.
+    #[command(name = "ps")]
+    Ps {
+        /// Container name, mount-namespace path, or PID.
+        target: String,
+        /// Send SIGKILL to every matching process instead of listing them.
+        #[arg(long)]
+        kill: bool,
+    },
     /// Serve a socks5 proxy server that could be used to escape a container
     Socks5 { port: u32 },
     /// Fire a single HTTP request to a URL

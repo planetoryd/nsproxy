@@ -861,6 +861,10 @@ fn main() -> anyhow::Result<()> {
             }
             println!();
         }
+        MainCommand::Ps { target, kill } => {
+            let _ = reload_handle.modify(|k| *k.filter_mut() = LevelFilter::WARN);
+            cmd_ps(&target, kill)?;
+        }
         MainCommand::Sudo { sargs } => {
             let mut shell_prefs = ShellPrefs::default();
             shell_prefs.take_args(sargs);
@@ -2355,6 +2359,110 @@ fn load_hot_config_with_serve_dns_overrides(
     hot
 }
 
+#[derive(Debug)]
+struct NamespaceProcess {
+    pid: u32,
+    command: String,
+}
+
+fn resolve_ps_netns(target: &str) -> Result<UniqueFile> {
+    if let Ok(pid) = target.parse::<u32>() {
+        return Ok(ExactNS::from_source((PidPath::N(pid as i32), "net"))?.unique);
+    }
+
+    let registry = NamespacesRegistry::load_locked()?;
+    if let Some(profile) = registry.profiles.get(target) {
+        return Ok(profile.net.unique);
+    }
+
+    let path = if target.starts_with('/') || target.starts_with("./") || target.starts_with("~/") {
+        PathExpansionState::without_instance().expand(Path::new(target))
+    } else {
+        bail!(
+            "unknown container {:?}; expected a container name, mount path, or PID",
+            target
+        );
+    };
+    let mount_ns = ExactNS::from_source(path)?;
+    registry
+        .profiles
+        .values()
+        .find(|profile| profile.mnt.unique == mount_ns.unique)
+        .map(|profile| profile.net.unique)
+        .ok_or_else(|| anyhow!("no registered container matches mount namespace {:?}", target))
+}
+
+fn scan_processes_in_netns(netns: UniqueFile) -> Vec<NamespaceProcess> {
+    let mut processes = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return processes;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        let ns_path = entry.path().join("ns/net");
+        let Ok(metadata) = std::fs::metadata(ns_path) else {
+            continue;
+        };
+        if UniqueFile::new(metadata.ino(), metadata.dev()) != netns {
+            continue;
+        }
+
+        let command = std::fs::read(entry.path().join("cmdline"))
+            .ok()
+            .filter(|cmdline| !cmdline.is_empty())
+            .map(|cmdline| {
+                String::from_utf8_lossy(&cmdline)
+                    .replace('\0', " ")
+                    .trim()
+                    .to_string()
+            })
+            .filter(|command| !command.is_empty())
+            .or_else(|| std::fs::read_to_string(entry.path().join("comm")).ok())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        processes.push(NamespaceProcess { pid, command });
+    }
+
+    processes.sort_by_key(|process| process.pid);
+    processes
+}
+
+fn cmd_ps(target: &str, kill: bool) -> Result<()> {
+    let netns = resolve_ps_netns(target)?;
+    let processes = scan_processes_in_netns(netns);
+    println!("netns {}: {} process(es)", netns, processes.len());
+
+    if kill {
+        let self_pid = std::process::id();
+        for process in processes {
+            if process.pid == self_pid {
+                warn!(pid = process.pid, "skipping current process during namespace kill");
+                continue;
+            }
+            match nix::sys::signal::kill(
+                Pid::from_raw(process.pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) => println!("killed {:>6} {}", process.pid, process.command),
+                Err(nix::errno::Errno::ESRCH) => {
+                    warn!(pid = process.pid, "process exited during namespace scan")
+                }
+                Err(error) => {
+                    warn!(pid = process.pid, %error, "failed to kill process");
+                }
+            }
+        }
+    } else {
+        for process in processes {
+            println!("{:>6} {}", process.pid, process.command);
+        }
+    }
+    Ok(())
+}
+
 fn apply_hot_route_to_uplink(uplink: &mut nsproxy_core::uplink::UplinkHub, route: &HotRoute) {
     match route {
         HotRoute::None => uplink.set_routing(nsproxy_core::uplink::no_routing()),
@@ -2565,14 +2673,21 @@ fn cmd_serve(
             .build()?;
         let probe = probe_runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(1), async {
-                let (mut stream, netns) = diag::connect_with_identity(&diag_path).await?;
-                if netns == expected_netns {
+                let (mut stream, identity) = diag::connect_with_identity(&diag_path).await?;
+                info!(
+                    peer_pid = identity.self_pid,
+                    peer_netns = %identity.netns,
+                    expected_netns = %expected_netns,
+                    "probed existing TUN diagnostic socket"
+                );
+                if identity.netns == expected_netns {
                     return Ok::<bool, anyhow::Error>(true);
                 }
 
                 warn!(
                     expected = %expected_netns,
-                    actual = %netns,
+                    actual = %identity.netns,
+                    peer_pid = identity.self_pid,
                     "diag socket belongs to a different network namespace; requesting shutdown"
                 );
                 stream
