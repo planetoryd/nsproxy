@@ -1,0 +1,1 @@
+plasma-apply-colorscheme BreezeDark

@@ -883,40 +883,48 @@ fn main() -> anyhow::Result<()> {
             shell_prefs.take_enter_args(eargs);
             shell_prefs.adjust();
 
-            // Resolve the bind mount path: profile name resolves to /nsp3/{name}/net,
-            // otherwise treat as an explicit path if it starts with /, ./, or ~/
-            let (resolved_path, nsdata) = {
-                let t = &target;
-                if t.starts_with('/') || t.starts_with("./") || t.starts_with("~/") || t == "~" {
-                    let vars = PathExpansionState::without_instance();
-                    let p = vars.expand(Path::new(t));
-                    (Some(p.clone()), state_paths::metadata_for_bind(&p))
-                } else {
-                    let p = state_paths::profile_netns_bind(t);
-                    let m = state_paths::profile_ns_meta(t);
-                    info!("Resolved profile name {:?} to {:?}", t, &p);
-                    (Some(p), m)
-                }
-            };
-
-            if let Some(path) = resolved_path {
-                if let Some(ns_alive) = read_ns_alive_opt(&nsdata) {
-                    let profile = ns_alive.profile_name.as_deref().unwrap_or(target.as_str());
-                    let sandbox_status = read_sandbox_status(profile).ok_or_else(|| {
-                        anyhow!(
-                            "no valid sandbox status for '{}' — run 'sp sandbox {}' first",
-                            profile,
-                            profile
-                        )
-                    })?;
-                    enter_ns_sandboxed(&ns_alive, &sandbox_status, &path)?;
-                    apply_ns_env(&mut shell_prefs, &ns_alive);
-                    apply_dbus_env(&mut shell_prefs, &ns_alive);
-                } else {
-                    error!("NS data not found at {:?}", nsdata)
+            if target.eq_ignore_ascii_case("basis") {
+                let registry = NamespacesRegistry::load_locked()?;
+                let basis = registry.basis_ns.ok_or_else(|| {
+                    anyhow!("basis namespace is not recorded; run 'sp init' first")
+                })?;
+                basis.net.enter(CloneFlags::CLONE_NEWNET)?;
+                if let NSSource::Path(path) = &basis.net.source {
+                    shell_prefs.set_ns_env(Some(&path.to_string_lossy()));
                 }
             } else {
-                error!("specify --name <profile> or a path");
+                // Resolve the bind mount path: profile name resolves to /nsp3/{name}/net,
+                // otherwise treat as an explicit path if it starts with /, ./, or ~/
+                let (resolved_path, nsdata) = {
+                    let t = &target;
+                    if t.starts_with('/')
+                        || t.starts_with("./")
+                        || t.starts_with("~/")
+                        || t == "~"
+                    {
+                        let vars = PathExpansionState::without_instance();
+                        let p = vars.expand(Path::new(t));
+                        (p.clone(), state_paths::metadata_for_bind(&p))
+                    } else {
+                        let p = state_paths::profile_netns_bind(t);
+                        let m = state_paths::profile_ns_meta(t);
+                        info!("Resolved profile name {:?} to {:?}", t, &p);
+                        (p, m)
+                    }
+                };
+
+                let ns_alive = read_ns_alive(&nsdata)?;
+                let profile = ns_alive.profile_name.as_deref().unwrap_or(target.as_str());
+                let sandbox_status = read_sandbox_status(profile).ok_or_else(|| {
+                    anyhow!(
+                        "no valid sandbox status for '{}' — run 'sp sandbox {}' first",
+                        profile,
+                        profile
+                    )
+                })?;
+                enter_ns_sandboxed(&ns_alive, &sandbox_status, &resolved_path)?;
+                apply_ns_env(&mut shell_prefs, &ns_alive);
+                apply_dbus_env(&mut shell_prefs, &ns_alive);
             }
 
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -2550,17 +2558,30 @@ fn cmd_serve(
 
     let diag_path = diag::diag_sock_path(&profile);
     if diag_path.exists() {
-        match std::os::unix::net::UnixStream::connect(&diag_path) {
-            Ok(_) => {
+        let probe = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()?
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(1), diag::connect(&diag_path)).await
+            });
+        match probe {
+            Ok(Ok(_)) => {
                 bail!(
-                    "tun appears to be running (diag socket accepts connections): {:?}",
+                    "tun appears to be running (diag socket handshake succeeded): {:?}",
                     diag_path
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
-                    "diag socket probe failed ({}), proceeding with startup: {:?}",
+                    "diag socket handshake failed ({}), proceeding with startup: {:?}",
                     e, diag_path
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "diag socket handshake timed out, proceeding with startup: {:?}",
+                    diag_path
                 );
             }
         }

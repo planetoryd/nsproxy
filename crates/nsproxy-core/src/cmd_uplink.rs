@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use owo_colors::OwoColorize;
 use socks5_impl::protocol::WireAddress;
+use tracing::warn;
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
@@ -21,7 +22,7 @@ pub fn load_saved_uplink_hub() -> Result<crate::uplink::UplinkHub> {
     hub.load_stats()?;
 
     if count == 0 {
-        bail!(
+        warn!(
             "No saved proxies found. Import Clash config first with 'sp uplink clash config-add'."
         );
     }

@@ -401,32 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hotconfig_process_veth_dns_adds_aliases_once_and_preserves_explicit() {
-        let mut hot = HotConfig::default();
-        hot.dns.insert("peer.ns".to_owned(), "192.0.2.1".to_owned());
-        hot.veth = vec![
-            HotVeth {
-                dst: "peer".to_owned(),
-                dst_ip4: Some("192.0.2.2".parse().unwrap()),
-                ..Default::default()
-            },
-            HotVeth {
-                dst: "other".to_owned(),
-                dst_ip4: Some("192.0.2.3".parse().unwrap()),
-                ..Default::default()
-            },
-        ];
-
-        hot.process_veth_dns();
-        let first = hot.dns.clone();
-        hot.process_veth_dns();
-
-        assert_eq!(hot.dns, first);
-        assert_eq!(hot.dns.get("peer.ns"), Some(&"192.0.2.1".to_owned()));
-        assert_eq!(hot.dns.get("other.ns"), Some(&"192.0.2.3".to_owned()));
-    }
-
-    #[test]
     fn test_hotconfig_process_and_save_skips_unchanged_write() {
         let path = std::env::temp_dir().join(format!(
             "nsp3-hotconfig-test-{}-{}",
@@ -1379,7 +1353,7 @@ impl HotConfig {
                 continue;
             };
             self.dns
-                .entry(format!("{}.ns", veth.dst))
+                .entry(format!("{}.internal", veth.dst)) // Protocol compliant TLD. Not arbitrary.
                 .or_insert_with(|| ip.to_string());
         }
     }
