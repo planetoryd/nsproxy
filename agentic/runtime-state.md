@@ -11,6 +11,7 @@ Load this note for CLI commands, profile persistence, configuration, namespace e
 - `HotConfig` owns DNS, TUN, devices, mounts, locals, and daemon fields. `TemplateConfig` owns sandbox mode, mounts, chmod, env, and hot-config linkage.
 - Stateful path expansion uses `PathExpansionState::{expand_with,expand_source,expand_target}`.
 - Domains use canonical trailing-dot normalization via `normalize_domain` in `crates/common/src/lib.rs`.
+- Long-lived shell/daemon invocations log `{type, pid, nsid, args}` as one JSON object per line in the boot-scoped append-only JSONL file at `state_paths::process_log()` (`/nsp3/nsproxy-process-log.jsonl` by default). `args` is the serialized `Cli` JSON object, so memfd-launched commands retain their structured arguments across versions; definitely short-lived commands such as `completions`, `id`, and `version` are excluded. The boot ID marker at `process_log_boot()` rotates the logical history once per kernel boot; boot rotation is locked and normal writes use append mode.
 
 ## Sandboxing and mounts
 

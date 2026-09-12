@@ -26,6 +26,7 @@ use tokio::{
 };
 
 use futures_lite::future::block_on;
+use fs4::fs_std::FileExt;
 use hardware_address::MacAddr;
 use ipnetwork::{IpNetwork, Ipv4Network};
 use libc::KERN_HOTPLUG;
@@ -488,6 +489,65 @@ fn initialize_basis_namespace(
     Ok(NamespacesRegistry::initialize_basis(basis, replace)?)
 }
 
+fn should_log_process(cli: &Cli) -> bool {
+    matches!(
+        &cli.cmd,
+        MainCommand::Enter { .. }
+            | MainCommand::Socks5 { .. }
+            | MainCommand::Up { cmd: None, .. }
+            | MainCommand::Serve { .. }
+            | MainCommand::Dbus { .. }
+            | MainCommand::Sudo { .. }
+            | MainCommand::Basis {
+                cmd: BasisCommand::Enter { .. }
+            }
+            | MainCommand::Daemon { cmd: None }
+    )
+}
+
+fn log_process_invocation(cli: &Cli) -> Result<()> {
+    if !should_log_process(cli) {
+        return Ok(());
+    }
+
+    let log_path = state_paths::process_log();
+    let boot_path = state_paths::process_log_boot();
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let lock_path = boot_path.with_extension("lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
+
+    let boot_id = nsproxy_common::current_boot_id()?;
+    let previous_boot = fs::read_to_string(&boot_path).ok();
+    if previous_boot.as_deref() != Some(boot_id.as_str()) {
+        fs::File::create(&log_path)?;
+        fs::write(&boot_path, &boot_id)?;
+    }
+
+    let netns = ExactNS::from_source((PidPath::Selfproc, "net"))?.unique;
+    let entry = serde_json::json!({
+        "type": "process_start",
+        "pid": std::process::id(),
+        "nsid": netns,
+        "args": serde_json::to_value(cli)?,
+    });
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    serde_json::to_writer(&mut log, &entry)?;
+    log.write_all(b"\n")?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     // Ignore SIGPIPE so logging to a closed pipe does not kill the daemon.
     unsafe {
@@ -525,6 +585,8 @@ fn main() -> anyhow::Result<()> {
         .with(layer)
         .with(diag::DiagTracingLayer)
         .init();
+
+    log_process_invocation(&cli)?;
 
     let pid = nix::unistd::Pid::this();
 

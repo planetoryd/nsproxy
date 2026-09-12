@@ -204,6 +204,16 @@ pub mod state_paths {
             .collect();
         logs_root().join(format!("{}-{}.jsonl", safe_label, pid))
     }
+
+    /// Append-only log of nsproxy process invocations for the current boot.
+    pub fn process_log() -> PathBuf {
+        persist_root().join("nsproxy-process-log.jsonl")
+    }
+
+    /// Boot ID associated with [`process_log`].
+    pub fn process_log_boot() -> PathBuf {
+        persist_root().join("nsproxy-process-log.boot")
+    }
 }
 
 pub fn current_boot_time_secs() -> Result<u64> {
