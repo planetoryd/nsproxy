@@ -2326,9 +2326,12 @@ pub enum MainCommand {
     Ps {
         /// Container name, mount-namespace path, or PID.
         target: String,
-        /// Send SIGKILL to every matching process instead of listing them.
+        /// Send SIGTERM to every matching process instead of listing them.
         #[arg(long)]
         kill: bool,
+        /// Send SIGKILL instead of SIGTERM when used with --kill.
+        #[arg(short = '9', requires = "kill")]
+        force: bool,
     },
     /// Serve a socks5 proxy server that could be used to escape a container
     Socks5 { port: u32 },

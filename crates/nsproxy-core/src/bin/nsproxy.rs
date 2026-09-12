@@ -630,13 +630,6 @@ fn main() -> anyhow::Result<()> {
             // Keep this command output clean and human-focused.
             let _ = reload_handle.modify(|k| *k.filter_mut() = LevelFilter::WARN);
 
-            let env_value = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
-            let fmt_env = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
-
-            let container = env_value(ENV_CONTAINER);
-            let browser = env_value(ENV_PROFILE);
-            let netns = env_value(ENV_NS);
-
             let target_pid = pid;
             let target_ns = if let Some(pid) = target_pid {
                 Some(ProfileNamespaces {
@@ -662,19 +655,7 @@ fn main() -> anyhow::Result<()> {
                 println!();
             };
 
-            let status_width = "MISSING".len();
-
             println!("{}", "NSPROXY ID".bold().bright_cyan());
-            println!(
-                "{} {}={}  {}={}  {}={}",
-                "env".bold().bright_black(),
-                "container".bright_blue(),
-                fmt_env(container.clone()).bright_white(),
-                "browser".bright_blue(),
-                fmt_env(browser).bright_white(),
-                "netns".bright_blue(),
-                fmt_env(netns).bright_white()
-            );
 
             let self_rows = [
                 ("mnt", self_ns.mnt.unique.to_string()),
@@ -693,6 +674,7 @@ fn main() -> anyhow::Result<()> {
                 .max()
                 .unwrap_or(4)
                 .max("self".len());
+            let status_width = "MISSING".len();
 
             println!();
             println!("{}", "self".bold().bright_magenta());
@@ -717,100 +699,61 @@ fn main() -> anyhow::Result<()> {
             }
             print_divider(&self_widths);
 
-            if let Some(container_name) = container.as_deref().filter(|c| *c != "UNSPEC") {
+            let namespace_registry = NamespacesRegistry::load_locked().ok();
+            if let Some(registry) = namespace_registry.as_ref() {
                 println!();
+                println!("{}", "profiles".bold().bright_magenta());
+                let basis = registry.basis_ns.as_ref();
+                let mut profiles: Vec<_> = registry.profiles.iter().collect();
+                profiles.sort_by(|(left, _), (right, _)| left.cmp(right));
+                let profile_width = registry
+                    .profiles
+                    .keys()
+                    .map(String::len)
+                    .max()
+                    .into_iter()
+                    .chain(basis.map(|_| "basis".len()))
+                    .max()
+                    .unwrap_or("profile".len())
+                    .max("profile".len());
+                let match_width = "MATCH".len();
+                let profile_widths = [profile_width, match_width];
+                print_divider(&profile_widths);
                 println!(
-                    "{} {}",
-                    "claim".bold().bright_magenta(),
-                    format!("profile={}", container_name).bright_white()
-                );
-                let registry = NamespacesRegistry::load_locked()?;
-                let mut claim_rows: Vec<(String, String, String, bool, bool)> = Vec::new();
-                if let Some(declared) = registry.profiles.get(container_name) {
-                    for (label, declared_ns, self_actual) in [
-                        ("mnt", &declared.mnt, &self_ns.mnt),
-                        ("net", &declared.net, &self_ns.net),
-                        ("pid", &declared.pid, &self_ns.pid),
-                    ] {
-                        claim_rows.push((
-                            label.to_string(),
-                            declared_ns.unique.to_string(),
-                            self_actual.unique.to_string(),
-                            declared_ns.unique == self_actual.unique,
-                            false,
-                        ));
-                    }
-                } else {
-                    claim_rows.push((
-                        "-".to_string(),
-                        "-".to_string(),
-                        "-".to_string(),
-                        false,
-                        true,
-                    ));
-                }
-
-                let claim_kind_w = claim_rows
-                    .iter()
-                    .map(|r| r.0.len())
-                    .max()
-                    .unwrap_or(4)
-                    .max("kind".len());
-                let claim_declared_w = claim_rows
-                    .iter()
-                    .map(|r| r.1.len())
-                    .max()
-                    .unwrap_or(8)
-                    .max("declared".len());
-                let claim_self_w = claim_rows
-                    .iter()
-                    .map(|r| r.2.len())
-                    .max()
-                    .unwrap_or(4)
-                    .max("self".len());
-                let claim_widths = [claim_kind_w, claim_declared_w, claim_self_w, status_width];
-
-                print_divider(&claim_widths);
-                println!(
-                    "| {:<kind_w$} | {:<decl_w$} | {:<self_w$} | {:<status_w$} |",
-                    "kind".bold(),
-                    "declared".bold(),
-                    "self".bold(),
+                    "| {:<profile_w$} | {:<match_w$} |",
+                    "profile".bold(),
                     "status".bold(),
-                    kind_w = claim_kind_w,
-                    decl_w = claim_declared_w,
-                    self_w = claim_self_w,
-                    status_w = status_width
+                    profile_w = profile_width,
+                    match_w = match_width
                 );
-                print_divider(&claim_widths);
-                for (kind, declared_val, self_val, ok, missing) in claim_rows {
-                    let status_plain = if missing {
-                        "MISSING"
-                    } else if ok {
-                        "OK"
-                    } else {
-                        "DIFF"
-                    };
-                    let status_padded = format!("{:<width$}", status_plain, width = status_width);
-                    let status_colored = if missing {
-                        format!("{}", status_padded.yellow().bold())
-                    } else if ok {
-                        format!("{}", status_padded.green().bold())
-                    } else {
-                        format!("{}", status_padded.red().bold())
-                    };
+                print_divider(&profile_widths);
+                if let Some(basis) = basis {
+                    let matches = basis.mnt.unique == self_ns.mnt.unique
+                        && basis.net.unique == self_ns.net.unique
+                        && basis.pid.unique == self_ns.pid.unique;
+                    let status = if matches { "MATCH" } else { "-" };
                     println!(
-                        "| {:<kind_w$} | {:<decl_w$} | {:<self_w$} | {} |",
-                        kind,
-                        declared_val,
-                        self_val,
-                        status_colored,
-                        kind_w = claim_kind_w,
-                        decl_w = claim_declared_w,
-                        self_w = claim_self_w
+                        "| {:<profile_w$} | {:<match_w$} |",
+                        "basis",
+                        status,
+                        profile_w = profile_width,
+                        match_w = match_width
                     );
                 }
-                print_divider(&claim_widths);
+                for (name, declared) in profiles {
+                    let matches = declared.mnt.unique == self_ns.mnt.unique
+                        && declared.net.unique == self_ns.net.unique
+                        && declared.pid.unique == self_ns.pid.unique;
+                    let status = if matches { "MATCH" } else { "-" };
+                    println!(
+                        "| {:<profile_w$} | {:<match_w$} |",
+                        name,
+                        status,
+                        profile_w = profile_width,
+                        match_w = match_width
+                    );
+                }
+                print_divider(&profile_widths);
             }
 
             if let Some(proc) = target_ns {
@@ -923,9 +866,13 @@ fn main() -> anyhow::Result<()> {
             }
             println!();
         }
-        MainCommand::Ps { target, kill } => {
+        MainCommand::Ps {
+            target,
+            kill,
+            force,
+        } => {
             let _ = reload_handle.modify(|k| *k.filter_mut() = LevelFilter::WARN);
-            cmd_ps(&target, kill)?;
+            cmd_ps(&target, kill, force)?;
         }
         MainCommand::Sudo { sargs } => {
             let mut shell_prefs = ShellPrefs::default();
@@ -2492,13 +2439,18 @@ fn scan_processes_in_netns(netns: UniqueFile) -> Vec<NamespaceProcess> {
     processes
 }
 
-fn cmd_ps(target: &str, kill: bool) -> Result<()> {
+fn cmd_ps(target: &str, kill: bool, force: bool) -> Result<()> {
     let netns = resolve_ps_netns(target)?;
     let processes = scan_processes_in_netns(netns);
     println!("netns {}: {} process(es)", netns, processes.len());
 
     if kill {
         let self_pid = std::process::id();
+        let signal = if force {
+            nix::sys::signal::Signal::SIGKILL
+        } else {
+            nix::sys::signal::Signal::SIGTERM
+        };
         for process in processes {
             if process.pid == self_pid {
                 warn!(pid = process.pid, "skipping current process during namespace kill");
@@ -2506,9 +2458,14 @@ fn cmd_ps(target: &str, kill: bool) -> Result<()> {
             }
             match nix::sys::signal::kill(
                 Pid::from_raw(process.pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
+                signal,
             ) {
-                Ok(()) => println!("killed {:>6} {}", process.pid, process.command),
+                Ok(()) => println!(
+                    "sent {} to {:>6} {}",
+                    if force { "SIGKILL" } else { "SIGTERM" },
+                    process.pid,
+                    process.command
+                ),
                 Err(nix::errno::Errno::ESRCH) => {
                     warn!(pid = process.pid, "process exited during namespace scan")
                 }
