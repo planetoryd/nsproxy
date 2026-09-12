@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 pub use nsproxy_common::stats::Timestamp;
 use nsproxy_common::{
     routing::{ProxyID, RoutingResovled},
-    state_paths,
+    state_paths, ExactNS, NSFrom, PidPath, UniqueFile,
 };
 use serde::{Deserialize, Serialize};
 use socks5_impl::protocol::WireAddress;
@@ -170,6 +170,8 @@ pub struct LogEntry {
 /// Commands that a connected EGUI client may send back to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlCommand {
+    /// Request the serving process to shut down.
+    Shutdown,
     /// Reload all uplink proxy configurations.
     ReloadUplink,
     /// Re-read hot.json from disk and apply it.
@@ -318,6 +320,7 @@ pub enum ProtocolChannel {
 pub struct ProtocolHandshake {
     pub channel: ProtocolChannel,
     pub version: String,
+    pub netns: UniqueFile,
 }
 
 static PROTOCOL_VERSION: OnceLock<String> = OnceLock::new();
@@ -350,20 +353,24 @@ pub fn protocol_mismatch_message(local: &str, remote: &str) -> String {
     format!("build hash mismatch: local={}, remote={}", local, remote)
 }
 
-fn local_handshake(channel: ProtocolChannel) -> ProtocolHandshake {
-    ProtocolHandshake {
+fn local_handshake(channel: ProtocolChannel) -> Result<ProtocolHandshake> {
+    Ok(ProtocolHandshake {
         channel,
         version: protocol_version().to_string(),
-    }
+        netns: ExactNS::from_source((PidPath::Selfproc, "net"))?.unique,
+    })
 }
 
 async fn write_handshake(stream: &mut UnixStream, channel: ProtocolChannel) -> Result<()> {
-    let frame = encode_frame(&local_handshake(channel))?;
+    let frame = encode_frame(&local_handshake(channel)?)?;
     stream.write_all(&frame).await?;
     Ok(())
 }
 
-async fn read_handshake(stream: &mut UnixStream, expected_channel: ProtocolChannel) -> Result<()> {
+async fn read_handshake(
+    stream: &mut UnixStream,
+    expected_channel: ProtocolChannel,
+) -> Result<ProtocolHandshake> {
     let Some(remote) = read_frame::<ProtocolHandshake, _>(stream).await? else {
         bail!("peer closed before protocol handshake");
     };
@@ -374,19 +381,27 @@ async fn read_handshake(stream: &mut UnixStream, expected_channel: ProtocolChann
             remote.channel
         );
     }
-    Ok(())
+    Ok(remote)
 }
 
 /// Client-side handshake: send local identity first, then validate server identity.
-pub async fn handshake_client(stream: &mut UnixStream, channel: ProtocolChannel) -> Result<()> {
+pub async fn handshake_client(
+    stream: &mut UnixStream,
+    channel: ProtocolChannel,
+) -> Result<ProtocolHandshake> {
     write_handshake(stream, channel.clone()).await?;
     read_handshake(stream, channel).await
 }
 
 /// Server-side handshake: validate client identity first, then send local identity.
-pub async fn handshake_server(stream: &mut UnixStream, channel: ProtocolChannel) -> Result<()> {
+pub async fn handshake_server(
+    stream: &mut UnixStream,
+    channel: ProtocolChannel,
+) -> Result<ProtocolHandshake> {
     read_handshake(stream, channel.clone()).await?;
-    write_handshake(stream, channel).await
+    write_handshake(stream, channel.clone()).await?;
+    // The server's own handshake is the identity returned to its client.
+    Ok(local_handshake(channel)?)
 }
 
 // ── Control socket (reversed-role connections) ────────────────────────
@@ -424,12 +439,16 @@ pub async fn read_control_greeting(
 
 /// Perform control-socket client-side handshake.
 pub async fn control_handshake_client(stream: &mut UnixStream) -> Result<()> {
-    handshake_client(stream, ProtocolChannel::Control).await
+    handshake_client(stream, ProtocolChannel::Control)
+        .await
+        .map(|_| ())
 }
 
 /// Perform control-socket server-side handshake.
 pub async fn control_handshake_server(stream: &mut UnixStream) -> Result<()> {
-    handshake_server(stream, ProtocolChannel::Control).await
+    handshake_server(stream, ProtocolChannel::Control)
+        .await
+        .map(|_| ())
 }
 
 // ── Connection-tracking types ────────────────────────────────────────
@@ -977,9 +996,15 @@ where
 
 /// Connect to a running tun2socks5 diag socket.
 pub async fn connect(sock_path: &Path) -> Result<DiagEventStream> {
+    let (stream, _) = connect_with_identity(sock_path).await?;
+    Ok(stream)
+}
+
+/// Connect to a diagnostic socket and return the server's network namespace identity.
+pub async fn connect_with_identity(sock_path: &Path) -> Result<(DiagEventStream, UniqueFile)> {
     let mut stream = UnixStream::connect(sock_path).await?;
-    handshake_client(&mut stream, ProtocolChannel::Diag).await?;
-    Ok(DiagEventStream::from_stream(stream))
+    let handshake = handshake_client(&mut stream, ProtocolChannel::Diag).await?;
+    Ok((DiagEventStream::from_stream(stream), handshake.netns))
 }
 
 pub struct DiagEventStream {

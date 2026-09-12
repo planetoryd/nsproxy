@@ -2558,19 +2558,40 @@ fn cmd_serve(
 
     let diag_path = diag::diag_sock_path(&profile);
     if diag_path.exists() {
-        let probe = tokio::runtime::Builder::new_current_thread()
+        let expected_netns = profile_namespaces.net.unique;
+        let probe_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
-            .build()?
-            .block_on(async {
-                tokio::time::timeout(Duration::from_secs(1), diag::connect(&diag_path)).await
-            });
+            .build()?;
+        let probe = probe_runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let (mut stream, netns) = diag::connect_with_identity(&diag_path).await?;
+                if netns == expected_netns {
+                    return Ok::<bool, anyhow::Error>(true);
+                }
+
+                warn!(
+                    expected = %expected_netns,
+                    actual = %netns,
+                    "diag socket belongs to a different network namespace; requesting shutdown"
+                );
+                stream
+                    .send_cmd(&diag::ControlCommand::Shutdown)
+                    .await
+                    .context("request shutdown from existing TUN")?;
+                Ok(false)
+            })
+            .await
+        });
         match probe {
-            Ok(Ok(_)) => {
+            Ok(Ok(true)) => {
                 bail!(
                     "tun appears to be running (diag socket handshake succeeded): {:?}",
                     diag_path
                 );
+            }
+            Ok(Ok(false)) => {
+                warn!("existing TUN shutdown requested, proceeding with startup");
             }
             Ok(Err(e)) => {
                 warn!(
@@ -2864,6 +2885,10 @@ fn cmd_serve(
                             scope_for_cmd.scope(async move {
                             while let Some(cmd) = cmd_rx.recv().await {
                                 match cmd {
+                                    diag::ControlCommand::Shutdown => {
+                                        warn!("serve shutdown requested via diag socket");
+                                        std::process::exit(0);
+                                    }
                                     diag::ControlCommand::ReloadUplink => {
                                         if let Ok(hub) = nsproxy_core::cmd_uplink::load_saved_uplink_hub() {
                                             let mut hub = hub;
@@ -3118,7 +3143,7 @@ fn cmd_serve(
     Ok(())
 }
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use arc_swap::ArcSwap;
 
 /// Shared mutable state for the `sp up` daemon.
