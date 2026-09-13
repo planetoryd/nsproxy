@@ -1167,7 +1167,6 @@ impl Supervisor {
             }
         }
         self.known_profiles.insert(profile.clone());
-        self.ensure_up_client(&profile);
         self.refresh_profile_status(&profile);
     }
 
@@ -2414,11 +2413,6 @@ impl Supervisor {
 
     fn refresh_profile_status_inner(&mut self, profile: &ContainerName, rearm_clients: bool) {
         let _had_up_client = self.up_cmd.contains_key(profile);
-        let up_connection_state = self
-            .up_connection
-            .get(profile)
-            .map(|status| status.state)
-            .unwrap_or_default();
         let had_diag_client = self.diag_cmd.contains_key(profile);
         let diag_connection_state = self
             .diag_connection
@@ -2490,9 +2484,6 @@ impl Supervisor {
         let start_in_flight = matches!(
             self.container_lifecycle(profile),
             ContainerLifecycleState::Starting
-        ) && matches!(
-            up_connection_state,
-            ConnectionState::Connecting | ConnectionState::Connected
         );
         self.reconcile_container_lifecycle(profile, child_alive, start_in_flight);
 
@@ -2503,10 +2494,10 @@ impl Supervisor {
             self.process_list_snapshot.remove(profile);
             if start_in_flight {
                 // Container is in Starting state — sp up hasn't written ns_alive yet.
-                // Keep the up client alive so it can connect once the daemon is ready.
+                // Wait for the daemon's reverse control-socket connection.
                 debug!(
                     profile = profile.as_str(),
-                    "child not yet alive but start is in-flight; preserving up client tx"
+                    "child not yet alive but start is in-flight; awaiting up daemon control connection"
                 );
             } else {
                 info!(
@@ -2808,6 +2799,10 @@ impl Supervisor {
                     "control socket: up daemon connected, starting direct stream handler"
                 );
                 self.known_profiles.insert(profile.clone());
+                // `sp up` writes ns_alive before it can complete this authenticated
+                // control handshake. Refresh on that readiness boundary without
+                // rearming an outbound client connection.
+                self.refresh_profile_state_only(&profile);
                 // Replace cmd channel — dropping old sender exits any retry loop cleanly.
                 let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<diag::DaemonRequest>();
                 self.up_cmd.insert(profile.clone(), cmd_tx);
