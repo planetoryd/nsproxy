@@ -1235,7 +1235,7 @@ impl Supervisor {
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let control_sock_path =
-            PathBuf::from(format!("/tmp/nsproxy-ui-{}.sock", std::process::id()));
+            state_paths::persist_root().join(format!("nsproxy-ui-{}.sock", std::process::id()));
         Self {
             cmd_rx,
             event_tx,

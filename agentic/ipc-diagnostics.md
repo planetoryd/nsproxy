@@ -20,7 +20,10 @@ Load this note for `sp up`, `sp serve`, Unix socket protocols, reconnection, rou
 
 Both service processes and the UI can establish the active channel; core correctness must not depend on polling.
 
-- The UI listens on `/tmp/nsproxy-ui-{pid}.sock` through `control_socket_accept_loop`.
+- The UI listens on `/nsp3/nsproxy-ui-{pid}.sock` through `control_socket_accept_loop`.
+- `sp init` creates `/nsp3` and sets that root directory to mode `0777`, allowing an
+  unprivileged UI to bind its control socket there. It does not change permissions of
+  a custom `--root` directory.
 - Services greet it with `ControlSocketGreeting::{UpDaemon,ServeDaemon}` via `connect_and_greet_up` / `connect_and_greet_serve`.
 - UI injection paths are `InjectUpStream`, `InjectDiagStream`, and `run_injected_up_stream`.
 - On UI restart, `up_client_loop` can connect to an existing daemon through `diag::connect_up_daemon`.

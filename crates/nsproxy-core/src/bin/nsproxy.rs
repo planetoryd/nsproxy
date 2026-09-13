@@ -41,8 +41,8 @@ use nix::{
 };
 use notify::{Event, EventKind, RecommendedWatcher, Watcher, event::ModifyKind};
 use nsproxy_common::{
-    ExactNS, Inode, NSFrom, NSSource, NamespacesRegistry, PidPath, ProfileNamespaces, UniqueFile,
-    forever,
+    ExactNS, Inode, NSFrom, NSSource, NamespacesRegistry, PERSIST_ROOT, PidPath,
+    ProfileNamespaces, UniqueFile, forever,
 };
 use nsproxy_core::{
     BasisCommand, Cli, DaemonCliRequest, HotConfig, MainCommand, NetlinkOps, NsproxyConfig, Paths,
@@ -443,6 +443,12 @@ fn validate_recorded_basis(
 fn initialize_basis_namespace(
     force: bool,
 ) -> anyhow::Result<nsproxy_common::NamespaceRegistryInit> {
+    let persist_root = state_paths::persist_root();
+    std::fs::create_dir_all(&persist_root)?;
+    if persist_root == Path::new(PERSIST_ROOT) {
+        std::fs::set_permissions(&persist_root, Permissions::from_mode(0o777))?;
+    }
+
     let current = ProfileNamespaces {
         // Mount namespaces are recorded via a /proc path source since they are
         // not bind-mounted to a stable file path like net/pid.
