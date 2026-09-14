@@ -93,22 +93,22 @@ nsproxy-hickory-util = { path = "../hickory-dns/util" }
 [workspace.dependencies]
 tun-rs = { version = "2.7.2", features = ["async_io"] }
 flume = "0.11.1"
-rust-tun = { package = "nsproxy-tun", path = "crates/rust-tun" }
+rust-tun = { package = "nsproxy-tun", version = "0.6.1", path = "crates/rust-tun" }
 netlink-ops = { path = "crates/netlink-ops" }
-rtnetlink = { package = "nsproxy-rtnetlink", path = "crates/rtnetlink" }
-rustables = { package = "nsproxy-rustables", path = "crates/rustables" }
-netlink-packet-audit = { package = "nsproxy-netlink-packet-audit", path = "crates/netlink-packet-audit" }
-netlink-sys = { package = "nsproxy-netlink-sys", path = "crates/netlink-sys" }
-netlink-proto = { package = "nsproxy-netlink-proto", path = "crates/netlink-proto" }
-tun2socks5 = { package = "nsproxy-tun2socks5", path = "crates/tun2socks5" }
-socks5-impl = { package = "nsproxy-socks5-impl", path = "crates/socks5-impl" }
-pidfd = { package = "nsproxy-pidfd", path = "crates/pidfd" }
-ipstack = { package = "nsproxy-ipstack", path = "crates/ipstack" }
-clone3 = { package = "nsproxy-clone3", path = "crates/clone3" }
+rtnetlink = { package = "nsproxy-rtnetlink", version = "0.18.1", path = "crates/rtnetlink" }
+rustables = { package = "nsproxy-rustables", version = "0.8.1", path = "crates/rustables" }
+netlink-packet-audit = { package = "nsproxy-netlink-packet-audit", version = "0.6.1", path = "crates/netlink-packet-audit" }
+netlink-sys = { package = "nsproxy-netlink-sys", version = "0.8.5", path = "crates/netlink-sys" }
+netlink-proto = { package = "nsproxy-netlink-proto", version = "0.12.0", path = "crates/netlink-proto" }
+tun2socks5 = { package = "nsproxy-tun2socks5", version = "0.1.0", path = "crates/tun2socks5" }
+socks5-impl = { package = "nsproxy-socks5-impl", version = "0.5.6", path = "crates/socks5-impl" }
+pidfd = { package = "nsproxy-pidfd", version = "0.2.4", path = "crates/pidfd" }
+ipstack = { package = "nsproxy-ipstack", version = "0.0.2", path = "crates/ipstack" }
+clone3 = { package = "nsproxy-clone3", version = "0.2.3", path = "crates/clone3" }
 nsproxy-ui = { path = "crates/nsproxy-ui" }
-netlink-packet-route = { package = "nsproxy-netlink-packet-route", path = "crates/netlink-packet-route" }
-netlink-packet-utils = { package = "nsproxy-netlink-packet-utils", path = "crates/netlink-packet-utils" }
-netlink-packet-core = { package = "nsproxy-netlink-packet-core", path = "crates/netlink-packet-core" }
+netlink-packet-route = { package = "nsproxy-netlink-packet-route", version = "0.25.1", path = "crates/netlink-packet-route" }
+netlink-packet-utils = { package = "nsproxy-netlink-packet-utils", version = "0.6.0", path = "crates/netlink-packet-utils" }
+netlink-packet-core = { package = "nsproxy-netlink-packet-core", version = "0.8.0", path = "crates/netlink-packet-core" }
 fs4 = { version = "0.13", features = ["tokio"] }
 rlimit = "0.10.1"
 passfd = { version = "*" }

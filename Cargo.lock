@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "diag"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -4049,6 +4049,7 @@ dependencies = [
  "nsproxy-pidfd",
  "nsproxy-rtnetlink",
  "nsproxy-socks5-impl",
+ "nsproxy-trojan-proto",
  "nsproxy-tun2socks5",
  "nsproxy-warp",
  "owo-colors",
@@ -4074,7 +4075,6 @@ dependencies = [
  "toml_edit 0.23.5",
  "tracing",
  "tracing-subscriber",
- "trojan-proto",
  "trust-dns-proto",
  "tun-rs",
  "twox-hash",
@@ -4323,6 +4323,13 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "nsproxy-trojan-proto"
+version = "0.4.0"
+dependencies = [
+ "bytes 1.11.1",
 ]
 
 [[package]]
@@ -6914,13 +6921,6 @@ name = "triomphe"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "859eb650cfee7434994602c3a68b25d77ad9e68c8a6cd491616ef86661382eb3"
-
-[[package]]
-name = "trojan-proto"
-version = "0.4.0"
-dependencies = [
- "bytes 1.11.1",
-]
 
 [[package]]
 name = "trust-dns-proto"

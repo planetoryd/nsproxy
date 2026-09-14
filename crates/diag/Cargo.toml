@@ -1,6 +1,6 @@
 [package]
 name = "diag"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license.workspace = true
 
@@ -13,7 +13,7 @@ tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt", "macro
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 flume.workspace = true
-nsproxy-common = { path = "../common" }
+nsproxy-common = { version = "0.1.0", path = "../common" }
 socks5-impl = { workspace = true }
 nix = { version = "0.27.1", features = ["sched"] }
 futures = "0.3.31"

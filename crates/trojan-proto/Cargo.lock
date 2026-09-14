@@ -244,6 +244,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
+name = "nsproxy-trojan-proto"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "criterion",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -436,14 +444,6 @@ checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "trojan-proto"
-version = "0.4.0"
-dependencies = [
- "bytes",
- "criterion",
 ]
 
 [[package]]
